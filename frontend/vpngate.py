@@ -883,7 +883,7 @@ def build_outputs(results, raw_count, sstp_count, source, healthy_edges, history
         "fish_ready": _cnt("fish_ready"),          # 养鱼池（稳定但暂不够格进四场景）
         "stable_count": _cnt("is_stable"),         # 波动率达标节点数
         "datacenter_count": sum(1 for n in filtered_available if n.get("is_datacenter_node")),
-        "watch_count": len(data.get("watch_nodes", []) if "watch_nodes" in data else [n for n in filtered_available if not n.get("is_stable") and not (n.get("support_ready") or n.get("game_ready") or n.get("speed_ready") or n.get("ai_ready"))]),
+        "watch_count": len(watch_nodes),
         "healthy_edges": len(healthy_edges),
     }
 
