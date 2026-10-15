@@ -68,7 +68,15 @@ def env_float(key: str, default: float) -> float:
         return default
 
 REPO_DIR = os.path.dirname(os.path.abspath(__file__))
-MAX_PER_COUNTRY = env_int("MAX_PER_COUNTRY", 6)
+MAX_PER_COUNTRY = env_int("MAX_PER_COUNTRY", 12)
+
+# ---- 历史缓存 / 养鱼池 / 稳定性 ----
+HISTORY_FILE = env_str("HISTORY_FILE", os.path.join(REPO_DIR, "cache", "nodes_history.json"))
+AUTO_BAN_THRESHOLD = env_int("AUTO_BAN_THRESHOLD", 5)     # 连续 N 次失败自动黑名单
+STABILITY_WINDOW = env_int("STABILITY_WINDOW", 5)         # 最近 N 次延迟
+STABILITY_THRESHOLD = env_float("STABILITY_THRESHOLD", 0.30)  # 波动率 < 30% 为稳定
+FISH_GRADUATE_ROUNDS = env_int("FISH_GRADUATE_ROUNDS", 3)  # 养鱼池毕业：连续 N 轮稳定
+SPEED_MAX_LATENCY = env_float("SPEED_MAX_LATENCY", 5000)  # 下载场景延迟上限
 
 # 官方 API（会话层已带重试，不再列重复的 http 源）
 VPNGATE_API = env_str("VPNGATE_API", "https://www.vpngate.net/api/iphone/")
@@ -502,12 +510,107 @@ def classify_network(host, exit_org, is_datacenter=None):
         return "residential"
     return "unknown"
 
-def evaluate_stability(node: dict) -> dict:
+# ---------------------------------------------------------------------------
+# 历史缓存 / 自动黑名单 / 稳定性判定
+# ---------------------------------------------------------------------------
+def load_history():
+    """加载历史节点缓存（cache/nodes_history.json）"""
+    try:
+        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def save_history(history):
+    """保存历史节点缓存"""
+    os.makedirs(os.path.dirname(HISTORY_FILE), exist_ok=True)
+    with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+        json.dump(history, f, ensure_ascii=False, indent=1)
+
+def calc_volatility(latencies):
+    """计算延迟波动率（标准差/均值），< STABILITY_THRESHOLD 为稳定"""
+    if len(latencies) < 2:
+        return None
+    import statistics
+    mean = statistics.mean(latencies)
+    if mean == 0:
+        return None
+    return statistics.stdev(latencies) / mean
+
+def update_history(history, results, feed_nodes):
     """
-    四场景评级（全部基于实测 + feed 指标，不臆造）:
+    更新历史缓存：
+    - feed 中的节点（host:port）更新 last_seen
+    - 检测成功的节点记录延迟
+    - 检测失败的节点累加 fail_count
+    - 连续失败超过阈值 → 返回需自动 ban 的列表
+    """
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    to_ban = []
+
+    # feed 中出现的节点标记 last_seen
+    feed_keys = set()
+    for n in feed_nodes:
+        key = f"{n['host']}:{n['port']}"
+        feed_keys.add(key)
+        if key not in history:
+            history[key] = {"first_seen": now, "last_seen": now, "fail_count": 0, "latencies": [], "stable_rounds": 0}
+        else:
+            history[key]["last_seen"] = now
+
+    # 检测结果更新
+    for r in results:
+        key = f"{r.get('host') or r.get('hostName')}:{r.get('port')}"
+        if key not in history:
+            history[key] = {"first_seen": now, "last_seen": now, "fail_count": 0, "latencies": [], "stable_rounds": 0}
+        h = history[key]
+        if r.get("success"):
+            h["fail_count"] = 0
+            lat = r.get("latency_ms")
+            if lat is not None:
+                h["latencies"] = (h["latencies"] + [lat])[-STABILITY_WINDOW:]
+            # 稳定性判定
+            vol = calc_volatility(h["latencies"])
+            if vol is not None and vol < STABILITY_THRESHOLD:
+                h["stable_rounds"] = h.get("stable_rounds", 0) + 1
+            else:
+                h["stable_rounds"] = 0
+        else:
+            h["fail_count"] = h.get("fail_count", 0) + 1
+            h["stable_rounds"] = 0
+            if h["fail_count"] >= AUTO_BAN_THRESHOLD and key not in feed_keys:
+                to_ban.append(key)
+
+    # 清理太久没出现的节点（>30 天）
+    cutoff = (datetime.now(timezone.utc) - __import__("datetime").timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S UTC")
+    history = {k: v for k, v in history.items() if v.get("last_seen", "") >= cutoff}
+
+    return history, to_ban
+
+def merge_history(uniq, history):
+    """合并历史节点到检测队列（去重后）"""
+    existing = {f"{n['host']}:{n['port']}" for n in uniq}
+    merged = list(uniq)
+    for key, h in history.items():
+        if key in existing:
+            continue
+        if h.get("fail_count", 0) >= AUTO_BAN_THRESHOLD:
+            continue  # 已在黑名单
+        host, port = key.rsplit(":", 1)
+        merged.append({
+            "host": host, "port": int(port), "ip": "",
+            "country": "未知", "country_code": "",
+            "uptime_hours": None, "sessions": 0,
+            "speed_mbps": 0, "score": 0, "ping_feed": 999,
+        })
+    return merged
+
+def evaluate_stability(node: dict, history_entry: dict = None) -> dict:
+    """
+    四场景评级（全部基于实测 + feed 指标 + 历史稳定性，不臆造）:
       support_ready  ⭐客服稳连: 干净IP + 住宅 + 在线>=12h + 负载<=120 + 抖动<=150 + 延迟<=600
       game_ready     🎮游戏:     延迟<=400 + 抖动<=100 + 负载<=250（允许短开机，响应优先）
-      speed_ready    ⬇️下载:     feed带宽>=阈值 + 实测可用 + 负载<=250
+      speed_ready    ⬇️下载:     feed带宽>=阈值 + 实测可用 + 负载<=250 + 延迟<=5000 + 稳定(波动率<30%)
       ai_ready       🤖国外AI:   干净IP + 在线>=6h + 抖动<=200 + 延迟<=800
     返回 dict，直接 update 进节点。
     """
@@ -516,6 +619,13 @@ def evaluate_stability(node: dict) -> dict:
     lat = node.get("latency_ms")
     jitter = node.get("jitter_ms")                 # None = 未复测
     is_res = node.get("residential") == "residential"
+
+    # 稳定性：从历史缓存计算波动率
+    vol = None
+    stable = False
+    if history_entry:
+        vol = calc_volatility(history_entry.get("latencies", []))
+        stable = vol is not None and vol < STABILITY_THRESHOLD
 
     exit_info = node.get("exit") or {}
     is_clean = exit_info.get("is_clean")
@@ -543,14 +653,19 @@ def evaluate_stability(node: dict) -> dict:
         and sessions <= GAME_MAX_SESSIONS and (not uptime_known or uptime_h >= 1.0)
         and is_clean is not False
     )
+    # 下载：放宽延迟到 5000ms，但要求稳定（波动率<30%）
     speed_ready = bool(
         (node.get("speed_mbps") or 0) >= SPEED_MIN_MBPS
-        and sessions <= SPEED_MAX_SESSIONS and lat_ok and lat <= 2000
+        and sessions <= SPEED_MAX_SESSIONS and lat_ok and lat <= SPEED_MAX_LATENCY
+        and stable
     )
     ai_ready = bool(
         is_clean is True and uptime_known and uptime_h >= AI_MIN_UPTIME_H
         and jitter_known and jitter <= AI_MAX_JITTER and lat_ok and lat <= AI_MAX_LATENCY
     )
+
+    # 养鱼池：检测成功但不够格进四场景，且稳定
+    fish_ready = bool(node.get("success") and not (support_ready or game_ready or speed_ready or ai_ready) and stable)
 
     lat_val = lat if lat_ok else 9999
     jitter_val = jitter if jitter_known else 0
@@ -579,6 +694,9 @@ def evaluate_stability(node: dict) -> dict:
         "speed_ready": speed_ready,
         "ai_ready": ai_ready,
         "is_clean": is_clean,
+        "fish_ready": fish_ready,
+        "is_stable": stable,
+        "volatility": round(vol, 3) if vol is not None else None,
     }
 
 def check_one(node, session):
@@ -699,14 +817,19 @@ def double_check_candidates(results, session):
 # ---------------------------------------------------------------------------
 # 生成数据与多场景订阅产物
 # ---------------------------------------------------------------------------
-def build_outputs(results, raw_count, sstp_count, source, healthy_edges):
+def build_outputs(results, raw_count, sstp_count, source, healthy_edges, history=None):
     # R2: 只用本轮实测成功的节点，绝不合并历史缓存
     available = [r for r in results if r.get("success")]
+    history = history or {}
 
     for n in available:
-        n.update(evaluate_stability(n))
+        key = f"{n.get('host')}:{n.get('port')}"
+        h_entry = history.get(key, {})
+        n.update(evaluate_stability(n, h_entry))
         code = (n.get("country_code") or "?").upper()
         n["region_group"] = "west" if code in WEST_SUPPORT_CODES else ("asia" if code in ASIA_SUPPORT_CODES else "other")
+        # 机房标记
+        n["is_datacenter_node"] = n.get("residential") == "datacenter"
         # 置顶名单：免场景门槛保送全部四条通道；但脏IP 仍不得进客服/AI（pin 不覆盖安全底线）
         n["pinned"] = _host_list_match(n, PIN_HOSTS)
         if n["pinned"]:
@@ -757,8 +880,25 @@ def build_outputs(results, raw_count, sstp_count, source, healthy_edges):
         "game_ready": _cnt("game_ready"),
         "speed_ready": _cnt("speed_ready"),
         "ai_ready": _cnt("ai_ready"),
+        "fish_ready": _cnt("fish_ready"),          # 养鱼池（稳定但暂不够格进四场景）
+        "stable_count": _cnt("is_stable"),         # 波动率达标节点数
+        "datacenter_count": sum(1 for n in filtered_available if n.get("is_datacenter_node")),
+        "watch_count": len(data.get("watch_nodes", []) if "watch_nodes" in data else [n for n in filtered_available if not n.get("is_stable") and not (n.get("support_ready") or n.get("game_ready") or n.get("speed_ready") or n.get("ai_ready"))]),
         "healthy_edges": len(healthy_edges),
     }
+
+    # 机房节点单独分组（好的机房 = 稳定 + 延迟相对较低）
+    datacenter_nodes = [n for n in filtered_available if n.get("is_datacenter_node")]
+    datacenter_premium = [n for n in datacenter_nodes if n.get("is_stable") and (n.get("latency_ms") or 9999) <= 3000]
+
+    # 养鱼池：稳定但不够格进四场景
+    fish_nodes = [n for n in filtered_available if n.get("fish_ready")]
+    fish_nodes.sort(key=lambda n: (n.get("composite_score", 9999), n.get("host") or ""))
+
+    # 观察组：不稳定但可用（波动大，观察中）
+    watch_nodes = [n for n in filtered_available
+                   if not n.get("fish_ready") and not (n.get("support_ready") or n.get("game_ready") or n.get("speed_ready") or n.get("ai_ready"))]
+    watch_nodes.sort(key=lambda n: (n.get("volatility") or 9999, n.get("host") or ""))
 
     return {
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
@@ -768,9 +908,13 @@ def build_outputs(results, raw_count, sstp_count, source, healthy_edges):
         "stats": stats,
         "countries": by_country,
         "available": filtered_available,
+        "datacenter_nodes": datacenter_nodes,
+        "datacenter_premium": datacenter_premium,
+        "fish_nodes": fish_nodes,
+        "watch_nodes": watch_nodes,
     }
 
-NODES_URL = env_str("NODES_URL", "https://<your-user>.github.io/gate/nodes.txt")
+NODES_URL = env_str("NODES_URL", "https://<your-user>.github.io/gate-system/nodes.txt")
 SUBSCRIPTION_URL = env_str("SUBSCRIPTION_URL", "https://<your-user>.github.io/gate/subscription.txt")
 
 MODE_META = {
@@ -779,6 +923,8 @@ MODE_META = {
     "game":    {"file": "nodes_game.txt",     "label": "🎮游戏低延迟"},
     "speed":   {"file": "nodes_speed.txt",    "label": "⬇️下载高速"},
     "ai":      {"file": "nodes_ai.txt",       "label": "🤖国外AI"},
+    "datacenter": {"file": "nodes_datacenter.txt", "label": "🖥️机房节点"},
+    "fish":       {"file": "nodes_fish.txt",       "label": "🐟养鱼池"},
 }
 
 def _mode_node_ok(n, mode):
@@ -790,6 +936,10 @@ def _mode_node_ok(n, mode):
         return n.get("speed_ready")
     if mode == "ai":
         return n.get("ai_ready")
+    if mode == "datacenter":
+        return n.get("is_datacenter_node")
+    if mode == "fish":
+        return n.get("fish_ready") or n.get("is_stable")
     return True
 
 def _mode_node_sort(n, mode):
@@ -815,6 +965,14 @@ def _mode_country_sort(kv, mode):
     count_key = {"game": "game_count", "speed": "speed_count", "ai": "ai_count"}.get(mode, "count")
     return (-int(grp.get(count_key) or 0), code)
 
+def _group_by_country(nodes):
+    """把节点列表转成 build_nodes_text 需要的 countries 格式"""
+    countries = {}
+    for n in nodes:
+        cname = n.get("country") or "未知"
+        countries.setdefault(cname, {"code": (n.get("country_code") or "?").upper(), "nodes": []})["nodes"].append(n)
+    return countries
+
 def build_nodes_text(data, mode="all"):
     """
     生成 EdgeTunnel / VLESS 自定义优选格式:
@@ -834,6 +992,8 @@ def build_nodes_text(data, mode="all"):
         if mode == "game": return "游戏"
         if mode == "speed": return "下载"
         if mode == "ai": return "AI"
+        if mode == "datacenter": return "机房"
+        if mode == "fish": return "养鱼"
         return "稳连" if n.get("tier") == "platinum" else ("住宅" if n.get("residential") == "residential" else "机房")
 
     def _emit(n, seq):
@@ -951,6 +1111,28 @@ def write_outputs(data):
             f.write(build_nodes_text(data, mode=mode))
         paths.append(p)
 
+    # 机房节点单独产物
+    dc_path = os.path.join(PUBLIC_DIR, "nodes_datacenter.txt")
+    with open(dc_path, "w", encoding="utf-8") as f:
+        f.write(build_nodes_text({"countries": _group_by_country(data.get("datacenter_nodes", [])), "stats": data.get("stats", {}), "edge_hosts": data.get("edge_hosts", [])}, mode="datacenter"))
+    paths.append(dc_path)
+
+    dcp_path = os.path.join(PUBLIC_DIR, "nodes_datacenter_premium.txt")
+    with open(dcp_path, "w", encoding="utf-8") as f:
+        f.write(build_nodes_text({"countries": _group_by_country(data.get("datacenter_premium", [])), "stats": data.get("stats", {}), "edge_hosts": data.get("edge_hosts", [])}, mode="datacenter"))
+    paths.append(dcp_path)
+
+    # 养鱼池 + 观察组
+    fish_path = os.path.join(PUBLIC_DIR, "nodes_fish.txt")
+    with open(fish_path, "w", encoding="utf-8") as f:
+        f.write(build_nodes_text({"countries": _group_by_country(data.get("fish_nodes", [])), "stats": data.get("stats", {}), "edge_hosts": data.get("edge_hosts", [])}, mode="fish"))
+    paths.append(fish_path)
+
+    watch_path = os.path.join(PUBLIC_DIR, "nodes_watch.txt")
+    with open(watch_path, "w", encoding="utf-8") as f:
+        f.write(build_nodes_text({"countries": _group_by_country(data.get("watch_nodes", [])), "stats": data.get("stats", {}), "edge_hosts": data.get("edge_hosts", [])}, mode="fish"))
+    paths.append(watch_path)
+
     sub_path = os.path.join(PUBLIC_DIR, "subscription.txt")
     with open(sub_path, "w", encoding="utf-8") as f:
         f.write(build_subscription_text(data))
@@ -974,6 +1156,9 @@ def main():
     feed_session = create_feed_session()
     check_session = create_check_session()
 
+    # 0. 加载历史缓存（历史节点累积 + 稳定性判定数据）
+    history = load_history()
+
     # 1. 自检优选入口域名，剔除死域名
     healthy_edges = get_healthy_edge_hosts()
 
@@ -988,6 +1173,8 @@ def main():
     if sstp_count == 0:
         die(f"从 {raw_count} 个原始节点中没有解析出任何 SSTP(TCP) 节点 — 数据格式可能已变化")
     uniq = dedupe(sstp_nodes)
+    # 合并历史节点（历史缓存累积，扩大检测池）
+    uniq = merge_history(uniq, history)
 
     # 黑名单：命中即永久剔除（在送检前剔除，节省 Worker 配额）
     if BAN_HOSTS:
@@ -1016,6 +1203,24 @@ def main():
     failed = [r for r in results if not r.get("success")]
     worker_errors = [r for r in failed if r.get("worker_error")]
 
+    # 更新历史缓存 + 自动黑名单（连续 N 次失败自动归入黑名单）
+    history, to_ban = update_history(history, results, sstp_nodes)
+    save_history(history)
+    if to_ban:
+        log("AUTO BAN", f"连续 {AUTO_BAN_THRESHOLD} 次失败的节点自动归入黑名单: {len(to_ban)} 个")
+        for key in to_ban[:10]:
+            log("AUTO BAN", f"  - {key}")
+
+    # 失败原因聚合（规则2：失败不静默，落盘 + 日志）
+    error_counts = {}
+    for r in failed:
+        err = (r.get("error") or "未知")[:80]
+        error_counts[err] = error_counts.get(err, 0) + 1
+    if error_counts:
+        log("ERROR SUMMARY", "失败原因分布 (Top10):")
+        for err, cnt in sorted(error_counts.items(), key=lambda x: -x[1])[:10]:
+            log("ERROR SUMMARY", f"  [{cnt}] {err}")
+
     log("CLOUDFLARE WORKER", f"最终稳定可用: {len(success)} | 淘汰/失败: {len(failed)} (Worker 异常 {len(worker_errors)}) | 耗时: {elapsed:.1f}s")
 
     # 置顶名单中被拉黑的/检测失败的节点给出明确告警（pin 了一个死节点没意义）
@@ -1027,7 +1232,7 @@ def main():
     if not success:
         die("本轮无可用节点（Worker 异常或全部探测失败）— 保留上次线上数据，不发布空结果")
 
-    data = build_outputs(results, raw_count, sstp_count, source, healthy_edges)
+    data = build_outputs(results, raw_count, sstp_count, source, healthy_edges, history=history)
     s = data["stats"]
     log("RESULT", f"入选精选节点: {s['success']} | ⭐客服稳连 {s['support_stable']} | 🎮游戏 {s['game_ready']} | ⬇️下载 {s['speed_ready']} | 🤖AI {s['ai_ready']} | 国家 {s['countries']}")
 

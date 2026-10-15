@@ -10,8 +10,15 @@ web/nodes_support.txt
 web/nodes_game.txt
 web/nodes_speed.txt
 web/nodes_ai.txt
+web/nodes_datacenter.txt
+web/nodes_datacenter_premium.txt
+web/nodes_fish.txt
+web/nodes_watch.txt
 web/subscription.txt
 web/subscription_base64.txt
+
+# ---- 历史缓存（运行时生成，不提交）----
+cache/
 
 # ---- 前端本地调试产物 ----
 client.yaml

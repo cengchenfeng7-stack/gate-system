@@ -84,6 +84,10 @@
     <span class="pill" data-f="game">🎮 游戏低延迟</span>
     <span class="pill" data-f="speed">⬇️ 下载高速</span>
     <span class="pill" data-f="ai">🤖 国外AI</span>
+    <span class="pill" data-f="datacenter">🖥️ 机房节点</span>
+    <span class="pill" data-f="fish">🐟 养鱼池</span>
+    <span class="pill" data-f="watch">👀 观察组</span>
+    <span class="pill" data-f="ai">🤖 国外AI</span>
     <span class="pill" data-f="west">🌍 欧美区</span>
     <span class="pill" data-f="asia">🌏 亚洲区</span>
     <span class="pill" data-f="residential">🏠 住宅家宽</span>
@@ -152,6 +156,9 @@
       ["⬇️ 下载可用", esc(s.speed_ready != null ? s.speed_ready : "-"), "高带宽优先"],
       ["🤖 国外AI", esc(s.ai_ready != null ? s.ai_ready : "-"), "干净IP+长在线"],
       ["住宅家宽(估算)", esc(s.residential_est != null ? s.residential_est : "-"), "机房 " + esc(s.datacenter_est || 0)],
+      ["🐟 养鱼池", esc(s.fish_ready != null ? s.fish_ready : "-"), "稳定观察中"],
+      ["🖥️ 机房节点", esc(s.datacenter_count != null ? s.datacenter_count : "-"), "含优质机房"],
+      ["👀 观察组", esc(s.watch_count != null ? s.watch_count : "-"), "波动中待观察"],
       ["覆盖国家/地区", esc(s.countries != null ? s.countries : "-"), "按可用节点统计"],
       ["健康优选入口", esc(s.healthy_edges != null ? s.healthy_edges : "-"), "TCP/TLS 实测存活"]
     ];
@@ -176,6 +183,9 @@
     if (FILTER === "ai") return !!n.ai_ready;
     if (FILTER === "west") return n.region_group === "west";
     if (FILTER === "asia") return n.region_group === "asia";
+    if (FILTER === "datacenter") return !!n.is_datacenter_node;
+    if (FILTER === "fish") return !!(n.fish_ready || n.is_stable);
+    if (FILTER === "watch") return !!n.success && !n.is_stable;
     return n.residential === FILTER;
   }
 
@@ -270,6 +280,31 @@
         '</tr></thead><tbody>' + rows + '</tbody></table></div>' +
       '</div>';
     }
+
+    // 🖥️ 机房节点分组
+    var dcNodes = (DATA && DATA.datacenter_nodes) || [];
+    if (dcNodes.length) {
+      var dcRows = "";
+      for (var di = 0; di < dcNodes.length; di++) dcRows += rowHtml(dcNodes[di]);
+      html += '<div class="country"><div class="head"><span>🖥️ 机房节点</span><span class="tag">' + dcNodes.length + ' 个 · 稳定 ' + dcNodes.filter(function(n){return n.is_stable}).length + '</span></div><div class="body"><table><thead><tr><th>Host:Port (点击复制)</th><th>类型与场景评级</th><th>实测延迟(抖动)</th><th class="hide-m">持续在线</th><th class="hide-m">当前负载</th><th class="hide-m">账面带宽</th><th class="hide-m">出口 IP 与运营商</th></tr></thead><tbody>' + dcRows + '</tbody></table></div></div>';
+    }
+
+    // 🐟 养鱼池分组
+    var fishNodes = (DATA && DATA.fish_nodes) || [];
+    if (fishNodes.length) {
+      var fishRows = "";
+      for (var fi = 0; fi < fishNodes.length; fi++) fishRows += rowHtml(fishNodes[fi]);
+      html += '<div class="country"><div class="head"><span>🐟 养鱼池（稳定观察中）</span><span class="tag">' + fishNodes.length + ' 个</span></div><div class="body"><table><thead><tr><th>Host:Port (点击复制)</th><th>类型与场景评级</th><th>实测延迟(抖动)</th><th class="hide-m">持续在线</th><th class="hide-m">当前负载</th><th class="hide-m">账面带宽</th><th class="hide-m">出口 IP 与运营商</th></tr></thead><tbody>' + fishRows + '</tbody></table></div></div>';
+    }
+
+    // 👀 观察组（波动中）
+    var watchNodes = (DATA && DATA.watch_nodes) || [];
+    if (watchNodes.length) {
+      var watchRows = "";
+      for (var wi = 0; wi < watchNodes.length; wi++) watchRows += rowHtml(watchNodes[wi]);
+      html += '<div class="country"><div class="head"><span>👀 观察组（波动中）</span><span class="tag">' + watchNodes.length + ' 个</span></div><div class="body"><table><thead><tr><th>Host:Port (点击复制)</th><th>类型与场景评级</th><th>实测延迟(抖动)</th><th class="hide-m">持续在线</th><th class="hide-m">当前负载</th><th class="hide-m">账面带宽</th><th class="hide-m">出口 IP 与运营商</th></tr></thead><tbody>' + watchRows + '</tbody></table></div></div>';
+    }
+
     box.innerHTML = html;
   }
 
