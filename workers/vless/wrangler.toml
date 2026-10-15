@@ -1,0 +1,9 @@
+name = "vless"
+main = "./worker.js"
+compatibility_date = "2026-05-01"
+workers_dev = true
+
+# 可选：绑定自定义域（部署后在 Dashboard 配置）
+# routes = [
+#   { pattern = "vless.example.com/*", zone_name = "example.com" }
+# ]

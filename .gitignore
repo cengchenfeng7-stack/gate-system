@@ -1,0 +1,32 @@
+# ============================================================
+# 只提交源码与模板；运行产物全部忽略（由 GitHub Actions 每轮生成）
+# 规则4/5：公开产物不含私有 Worker 域名；只提交源码
+# ============================================================
+
+# ---- 前端运行产物（web/ 下由流水线生成，不要提交）----
+web/data.json
+web/nodes.txt
+web/nodes_support.txt
+web/nodes_game.txt
+web/nodes_speed.txt
+web/nodes_ai.txt
+web/subscription.txt
+web/subscription_base64.txt
+
+# ---- 前端本地调试产物 ----
+client.yaml
+providers/
+*.ovpn
+ovpn_out/
+__pycache__/
+*.pyc
+.DS_Store
+*.log
+
+# ---- Workers 运行产物 / 大文件 ----
+workers/*/demo.png
+workers/*/worker.js.bak
+
+# ---- 系统 ----
+Thumbs.db
+desktop.ini

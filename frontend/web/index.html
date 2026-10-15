@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VPN Gate · SSTP 四场景稳连节点监控面板</title>
+<style>
+  :root {
+    --bg: #0b1120; --panel: #111a2e; --panel2: #16233c; --border: #243450;
+    --text: #dbe7ff; --muted: #7f93b8; --accent: #4cc2ff; --ok: #2fd08a;
+    --res: #b48cff; --dc: #ffb84d; --unk: #8a9bb5; --err: #ff5c5c; --gold: #ffd166;
+    --game: #7dd3fc; --speed: #f472b6; --ai: #a3e635;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif; min-height: 100vh; padding: 20px; }
+  .wrap { max-width: 1180px; margin: 0 auto; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 18px; line-height: 1.6; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 14px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 14px; }
+  .card .k { color: var(--muted); font-size: 12px; }
+  .card .v { font-size: 24px; font-weight: 700; margin-top: 4px; }
+  .bar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; align-items: center; }
+  .pill { background: var(--panel2); border: 1px solid var(--border); color: var(--text); border-radius: 999px; padding: 6px 14px; font-size: 13px; cursor: pointer; user-select: none; transition: all .2s; }
+  .pill:hover { border-color: var(--accent); }
+  .pill.on { border-color: var(--accent); color: var(--accent); background: rgba(76,194,255,.12); font-weight: 600; }
+  .qlabel { font-size: 12px; color: var(--muted); }
+  code { background: var(--panel2); padding: 3px 7px; border-radius: 5px; font-size: 12px; cursor: pointer; display: inline-block; }
+  code:hover { outline: 1px solid var(--accent); }
+  .legend { color: var(--muted); font-size: 12px; margin-bottom: 14px; line-height: 1.6; }
+  .country { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; margin-bottom: 14px; overflow: hidden; }
+  .country .head { display: flex; justify-content: space-between; padding: 12px 16px; background: var(--panel2); font-weight: 600; cursor: pointer; flex-wrap: wrap; gap: 6px; }
+  .country .head .tag { font-size: 12px; color: var(--muted); font-weight: 400; }
+  .country.collapsed .body { display: none; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { padding: 9px 12px; text-align: left; border-top: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  tr:hover td { background: rgba(76,194,255,.05); }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 6px; font-size: 11px; margin-right: 4px; }
+  .b-res { background: rgba(180,140,255,.15); color: var(--res); }
+  .b-dc { background: rgba(255,184,77,.15); color: var(--dc); }
+  .b-unk { background: rgba(138,155,181,.15); color: var(--unk); }
+  .b-plat { background: rgba(47,208,138,.18); color: var(--ok); font-weight: 600; }
+  .b-gold { background: rgba(255,209,102,.15); color: var(--gold); }
+  .b-scene { background: rgba(125,211,252,.12); padding: 2px 6px; }
+  .lat { color: var(--ok); font-weight: 600; }
+  .toast { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); background: var(--accent); color: #000; padding: 8px 20px; border-radius: 8px; font-size: 13px; z-index: 999; opacity: 0; transition: opacity .3s; pointer-events: none; font-weight: 600; }
+  .toast.show { opacity: 1; }
+  .empty { color: var(--muted); padding: 30px; text-align: center; }
+  .footer { color: var(--muted); font-size: 12px; margin-top: 20px; text-align: center; line-height: 1.7; }
+  .error-box { background: rgba(255,92,92,0.1); border: 1px solid var(--err); color: var(--err); padding: 18px; border-radius: 10px; margin-top: 20px; font-size: 14px; line-height: 1.6; }
+  .btn-retry { margin-top: 10px; background: var(--panel2); border: 1px solid var(--border); color: var(--text); padding: 6px 14px; border-radius: 6px; cursor: pointer; }
+  .btn-retry:hover { border-color: var(--accent); }
+  @media (max-width: 760px) { th, td { padding: 7px 8px; } .hide-m { display: none; } }
+</style>
+</head>
+<body>
+
+<div class="toast" id="toast"></div>
+
+<div class="wrap">
+  <h1>VPN Gate · SSTP 四场景稳连节点检测面板</h1>
+  <div class="sub">
+    已启用<strong>二次防闪断复测</strong>、<strong>入口优选域名存活自检</strong>与<strong>在线时长/负载/抖动加权排序</strong>。<br>
+    💡 四个场景通道：<span class="badge b-plat">⭐客服稳连</span>找客服/办公 &nbsp;<span class="badge b-scene">🎮游戏</span>低延迟 &nbsp;<span class="badge b-scene">⬇️下载</span>高带宽 &nbsp;<span class="badge b-scene">🤖AI</span>干净IP聊海外AI。<br>
+    ⚠️ 无论哪个场景，客户端都请<strong>手动固定一个节点</strong>，切勿开启自动测速切换（URL-Test）——IP 一变，客服/API 立刻踢你重连。
+  </div>
+
+  <div class="cards" id="cards"></div>
+
+  <div class="bar" id="subbar">
+    <span class="qlabel">🔗 一键复制订阅：</span>
+    <code class="qcopy" data-q="nodes_support.txt">⭐ 客服稳连</code>
+    <code class="qcopy" data-q="nodes_game.txt">🎮 游戏</code>
+    <code class="qcopy" data-q="nodes_speed.txt">⬇️ 下载</code>
+    <code class="qcopy" data-q="nodes_ai.txt">🤖 国外AI</code>
+    <code class="qcopy" data-q="nodes.txt">🌍 全量</code>
+    <code class="qcopy" data-q="subscription.txt">📱 通用订阅</code>
+  </div>
+
+  <div class="bar">
+    <span class="pill on" data-f="all">全部节点</span>
+    <span class="pill" data-f="support">⭐ 客服稳连</span>
+    <span class="pill" data-f="game">🎮 游戏低延迟</span>
+    <span class="pill" data-f="speed">⬇️ 下载高速</span>
+    <span class="pill" data-f="ai">🤖 国外AI</span>
+    <span class="pill" data-f="west">🌍 欧美区</span>
+    <span class="pill" data-f="asia">🌏 亚洲区</span>
+    <span class="pill" data-f="residential">🏠 住宅家宽</span>
+    <span class="pill" data-f="datacenter">🏢 数据中心</span>
+  </div>
+  <div class="legend">点击节点 <code>host:port</code> 可直接复制 <code>sstp://</code> 链接（含自定义账号密码）。节点行尾图标表示适配的场景。</div>
+
+  <div id="countries">
+    <div class="empty">⏳ 正在加载节点数据 (data.json)…</div>
+  </div>
+
+  <div class="footer" id="foot"></div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var DATA = null;
+  var FILTER = "all";
+  var toastTimer = null;
+
+  function byId(id) { return document.getElementById(id); }
+
+  // 安全加固：全量 HTML 转义，防止恶意节点名或 ASN 组织名触发 XSS
+  function esc(str) {
+    return String(str == null ? "" : str)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
+  function showToast(msg) {
+    var el = byId("toast");
+    el.textContent = msg;
+    el.classList.add("show");
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { el.classList.remove("show"); }, 2200);
+  }
+
+  function copyText(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () { showToast("已复制"); });
+    } else {
+      var ta = document.createElement("textarea");
+      ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+      document.body.appendChild(ta); ta.select();
+      try { document.execCommand("copy"); showToast("已复制"); } catch (e) { showToast("复制失败"); }
+      document.body.removeChild(ta);
+    }
+  }
+
+  function subBaseUrl() {
+    return location.origin + location.pathname.replace(/index\.html$/, "");
+  }
+
+  function renderCards(d) {
+    var s = (d && d.stats) || {};
+    var items = [
+      ["最后更新", esc((d && d.generated_at) || "-"), "每 30 分钟自动巡检"],
+      ["可用精选节点", esc(s.success != null ? s.success : "-"), "已过二次防抖复测"],
+      ["⭐ 客服稳连", esc(s.support_stable != null ? s.support_stable : "-"), "干净IP+住宅+长在线"],
+      ["🎮 游戏可用", esc(s.game_ready != null ? s.game_ready : "-"), "低延迟+低抖动"],
+      ["⬇️ 下载可用", esc(s.speed_ready != null ? s.speed_ready : "-"), "高带宽优先"],
+      ["🤖 国外AI", esc(s.ai_ready != null ? s.ai_ready : "-"), "干净IP+长在线"],
+      ["住宅家宽(估算)", esc(s.residential_est != null ? s.residential_est : "-"), "机房 " + esc(s.datacenter_est || 0)],
+      ["覆盖国家/地区", esc(s.countries != null ? s.countries : "-"), "按可用节点统计"],
+      ["健康优选入口", esc(s.healthy_edges != null ? s.healthy_edges : "-"), "TCP/TLS 实测存活"]
+    ];
+    var html = "";
+    for (var i = 0; i < items.length; i++) {
+      html += '<div class="card"><div class="k">' + items[i][0] + '</div><div class="v">' + items[i][1] + '</div><div class="k">' + items[i][2] + '</div></div>';
+    }
+    byId("cards").innerHTML = html;
+  }
+
+  function formatUptime(hours) {
+    if (hours == null || hours <= 0) return "未知";
+    if (hours >= 24) return (hours / 24).toFixed(1) + " 天";
+    return hours.toFixed(1) + " 小时";
+  }
+
+  function matchFilter(n) {
+    if (FILTER === "all") return true;
+    if (FILTER === "support") return !!n.support_ready;
+    if (FILTER === "game") return !!n.game_ready;
+    if (FILTER === "speed") return !!n.speed_ready;
+    if (FILTER === "ai") return !!n.ai_ready;
+    if (FILTER === "west") return n.region_group === "west";
+    if (FILTER === "asia") return n.region_group === "asia";
+    return n.residential === FILTER;
+  }
+
+  function rowHtml(n) {
+    var badge = '<span class="badge b-unk">未知</span>';
+    if (n.residential === "residential") badge = '<span class="badge b-res">住宅</span>';
+    else if (n.residential === "datacenter") badge = '<span class="badge b-dc">机房</span>';
+
+    var tierBadge = "";
+    if (n.tier === "platinum") tierBadge = '<span class="badge b-plat">⭐客服稳连</span>';
+    else if (n.tier === "gold") tierBadge = '<span class="badge b-gold">⚡高速稳定</span>';
+
+    var sceneBadges = "";
+    if (n.support_ready) sceneBadges += '<span class="badge b-scene" title="客服稳连">⭐</span>';
+    if (n.game_ready) sceneBadges += '<span class="badge b-scene" title="游戏低延迟">🎮</span>';
+    if (n.speed_ready) sceneBadges += '<span class="badge b-scene" title="下载高速">⬇️</span>';
+    if (n.ai_ready) sceneBadges += '<span class="badge b-scene" title="国外AI">🤖</span>';
+    if (n.is_clean === false) sceneBadges += '<span class="badge b-dc" title="出口IP有滥用/黑名单记录，慎用">⚠️脏IP</span>';
+    if (n.pinned) sceneBadges += '<span class="badge b-gold" title="手动置顶节点（pin.txt）">📌置顶</span>';
+
+    var exitStr = "-";
+    if (n.exit) {
+      exitStr = esc(n.exit.ip || "?") + " · " + esc(n.exit.org || n.exit.country || "");
+    }
+
+    var latStr = n.latency_ms != null ? esc(n.latency_ms) + " ms" : "-";
+    if (n.jitter_ms != null) {
+      latStr += ' <span style="color:var(--muted);font-size:11px;font-weight:400">(±' + esc(n.jitter_ms) + ')</span>';
+    } else {
+      latStr += ' <span style="color:var(--muted);font-size:11px;font-weight:400">(抖动未测)</span>';
+    }
+
+    var upStr = esc(formatUptime(n.uptime_hours));
+    var sessStr = n.sessions != null ? esc(n.sessions) + " 人" : "-";
+    var speedStr = n.speed_mbps != null ? esc(n.speed_mbps) + " Mbps" : "-";
+    var hostPort = esc(n.host) + ":" + esc(n.port);
+    var link = esc(n.link || ("sstp://vpn:vpn@" + n.host + ":" + n.port));
+
+    return '<tr>' +
+      '<td><code data-hp="' + hostPort + '" data-link="' + link + '" title="点击复制 sstp 链接">' + hostPort + '</code></td>' +
+      '<td>' + badge + tierBadge + sceneBadges + '</td>' +
+      '<td class="lat">' + latStr + '</td>' +
+      '<td class="hide-m">' + upStr + '</td>' +
+      '<td class="hide-m">' + sessStr + '</td>' +
+      '<td class="hide-m">' + speedStr + '</td>' +
+      '<td class="hide-m" style="color:var(--muted)">' + exitStr + '</td>' +
+      '</tr>';
+  }
+
+  function renderCountries() {
+    var box = byId("countries");
+    var cObj = (DATA && DATA.countries) || {};
+    var keys = Object.keys(cObj);
+    var entries = [];
+
+    for (var i = 0; i < keys.length; i++) {
+      var name = keys[i];
+      var grp = cObj[name] || {};
+      var allNodes = grp.nodes || [];
+      var filtered = [];
+      for (var j = 0; j < allNodes.length; j++) {
+        if (matchFilter(allNodes[j])) filtered.push(allNodes[j]);
+      }
+      if (filtered.length > 0) {
+        entries.push({ name: name, grp: grp, nodes: filtered, count: filtered.length });
+      }
+    }
+
+    entries.sort(function (a, b) { return b.count - a.count; });
+
+    if (entries.length === 0) {
+      box.innerHTML = '<div class="country"><div class="empty">没有符合当前筛选条件的可用节点</div></div>';
+      return;
+    }
+
+    var html = "";
+    for (var k = 0; k < entries.length; k++) {
+      var e = entries[k];
+      var g = e.grp;
+      var rows = "";
+      for (var r = 0; r < e.nodes.length; r++) {
+        rows += rowHtml(e.nodes[r]);
+      }
+      html += '<div class="country">' +
+        '<div class="head" onclick="this.parentElement.classList.toggle(\'collapsed\')">' +
+          '<span>🌏 ' + esc(e.name) + ' <span class="tag">' + esc(g.code || "") + '</span></span>' +
+          '<span class="tag">' + esc(e.count) + ' 个节点 · 住宅 ' + esc(g.residential || 0) + ' · 机房 ' + esc(g.datacenter || 0) +
+          ' · ⭐' + esc(g.support_count || 0) + ' 🎮' + esc(g.game_count || 0) + ' ⬇️' + esc(g.speed_count || 0) + ' 🤖' + esc(g.ai_count || 0) + '</span>' +
+        '</div>' +
+        '<div class="body"><table><thead><tr>' +
+          '<th>Host:Port (点击复制)</th><th>类型与场景评级</th><th>实测延迟(抖动)</th><th class="hide-m">持续在线</th><th class="hide-m">当前负载</th><th class="hide-m">账面带宽</th><th class="hide-m">出口 IP 与运营商</th>' +
+        '</tr></thead><tbody>' + rows + '</tbody></table></div>' +
+      '</div>';
+    }
+    box.innerHTML = html;
+  }
+
+  function render() {
+    renderCards(DATA);
+    renderCountries();
+    var s = (DATA && DATA.stats) || {};
+    byId("foot").innerHTML =
+      "数据时间 " + esc((DATA && DATA.generated_at) || "?") +
+      " · 来源 " + esc((DATA && DATA.source) || "?") +
+      " · 精选可用 " + esc(s.success || 0) + " / 总检测 " + esc(s.checked || 0) +
+      "<br>订阅文件：⭐ nodes_support.txt（客服） · 🎮 nodes_game.txt（游戏） · ⬇️ nodes_speed.txt（下载） · 🤖 nodes_ai.txt（海外AI） · 🌍 nodes.txt（全量）";
+  }
+
+  function fetchWithTimeout(url, timeoutMs) {
+    var controller = new AbortController();
+    var id = setTimeout(function () { controller.abort(); }, timeoutMs);
+    return fetch(url, { cache: "no-store", signal: controller.signal })
+      .finally(function () { clearTimeout(id); });
+  }
+
+  function load() {
+    byId("foot").textContent = "正在同步最新数据…";
+    fetchWithTimeout("data.json?t=" + Date.now(), 10000)
+      .then(function (res) {
+        if (!res.ok) throw new Error("HTTP " + res.status + "（找不到 data.json）");
+        return res.json();
+      })
+      .then(function (json) {
+        DATA = json;
+        render();
+      })
+      .catch(function (err) {
+        var msg = err.name === "AbortError" ? "请求超时（网络卡顿或阻断）" : err.message;
+        byId("foot").textContent = "同步失败: " + msg;
+        byId("countries").innerHTML =
+          '<div class="error-box">' +
+            '<strong>⚠️ 数据无法加载：</strong>' + esc(msg) + '<br>' +
+            '<button class="btn-retry" onclick="window.__loadData()">立即重试</button>' +
+          '</div>';
+      });
+  }
+
+  window.__loadData = load;
+
+  function init() {
+    var pills = document.querySelectorAll(".pill");
+    for (var i = 0; i < pills.length; i++) {
+      pills[i].addEventListener("click", function () {
+        FILTER = this.getAttribute("data-f");
+        for (var j = 0; j < pills.length; j++) {
+          pills[j].classList.toggle("on", pills[j].getAttribute("data-f") === FILTER);
+        }
+        if (DATA) renderCountries();
+      });
+    }
+
+    // 一键复制订阅文件链接
+    var qcopies = document.querySelectorAll(".qcopy");
+    for (var q = 0; q < qcopies.length; q++) {
+      qcopies[q].addEventListener("click", function () {
+        copyText(subBaseUrl() + this.getAttribute("data-q"));
+      });
+    }
+
+    // 点击节点复制完整 sstp 链接（含后端下发的账号密码）
+    document.addEventListener("click", function (e) {
+      var code = e.target.closest ? e.target.closest("code[data-hp]") : null;
+      if (!code) return;
+      var link = code.getAttribute("data-link") || ("sstp://vpn:vpn@" + (code.getAttribute("data-hp") || ""));
+      if (link) copyText(link);
+    });
+
+    load();
+    setInterval(load, 60000);
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", init);
+  } else {
+    init();
+  }
+})();
+</script>
+</body>
+</html>
