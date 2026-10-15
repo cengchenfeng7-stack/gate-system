@@ -867,6 +867,11 @@ def build_outputs(results, raw_count, sstp_count, source, healthy_edges, history
     def _cnt(flag):
         return sum(1 for n in filtered_available if n.get(flag))
 
+    # 观察组：不稳定但可用（波动大，观察中）—— 需在 stats 前定义
+    watch_nodes = [n for n in filtered_available
+                   if not n.get("fish_ready") and not (n.get("support_ready") or n.get("game_ready") or n.get("speed_ready") or n.get("ai_ready"))]
+    watch_nodes.sort(key=lambda n: (n.get("volatility") or 9999, n.get("host") or ""))
+
     stats = {
         "raw_nodes": raw_count,
         "sstp_nodes": sstp_count,
@@ -894,11 +899,6 @@ def build_outputs(results, raw_count, sstp_count, source, healthy_edges, history
     # 养鱼池：稳定但不够格进四场景
     fish_nodes = [n for n in filtered_available if n.get("fish_ready")]
     fish_nodes.sort(key=lambda n: (n.get("composite_score", 9999), n.get("host") or ""))
-
-    # 观察组：不稳定但可用（波动大，观察中）
-    watch_nodes = [n for n in filtered_available
-                   if not n.get("fish_ready") and not (n.get("support_ready") or n.get("game_ready") or n.get("speed_ready") or n.get("ai_ready"))]
-    watch_nodes.sort(key=lambda n: (n.get("volatility") or 9999, n.get("host") or ""))
 
     return {
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
