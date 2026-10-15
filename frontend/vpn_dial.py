@@ -70,17 +70,65 @@ def load_metrics(path: str) -> dict:
     except Exception:
         return {}
 
-def fetch_feed_configs() -> dict:
-    """{host(.opengw.net): feed行} —— 含官方 OpenVPN 配置(base64)与账面分"""
-    session = vp.create_feed_session()
-    rows, _src = vp.fetch_vpngate(session)
-    out = {}
-    for r in rows:
-        if not r.get("config_b64"):
-            continue
-        host = r["host"] if r["host"].endswith(".opengw.net") else r["host"] + ".opengw.net"
-        out[host] = r
-    return out
+def fetch_feed_configs(feed_file=None) -> dict:
+    """{host(.opengw.net): feed行} —— 含官方 OpenVPN 配置(base64)与账面分
+
+    双模式：本地为主，在线为辅。
+    - 本地 feed 文件存在 → 从本地读取（主，零网络依赖）
+    - 本地不存在 → 尝试在线拉取（辅，成功则保存本地缓存）
+    - 在线失败 → 用本地缓存（如果有）
+    """
+    def _rows_to_configs(rows):
+        out = {}
+        for r in rows:
+            if not r.get("config_b64"):
+                continue
+            host = r["host"] if r["host"].endswith(".opengw.net") else r["host"] + ".opengw.net"
+            out[host] = r
+        return out
+
+    def _read_local(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return vp.parse_csv(f.read()) or None
+        except Exception:
+            return None
+
+    # 主模式：本地 feed 文件
+    if feed_file and os.path.exists(feed_file):
+        log(f"[源] 读取本地 feed: {feed_file}")
+        rows = _read_local(feed_file)
+        if rows:
+            return _rows_to_configs(rows)
+        log("[源] 本地 feed 为空，尝试在线拉取")
+
+    # 辅模式：在线拉取
+    try:
+        session = vp.create_feed_session()
+        rows, _src = vp.fetch_vpngate(session)
+        if rows:
+            if feed_file:
+                try:
+                    os.makedirs(os.path.dirname(feed_file) or ".", exist_ok=True)
+                    resp = session.get(vp.VPNGATE_API, timeout=vp.HTTP_TIMEOUT)
+                    resp.raise_for_status()
+                    with open(feed_file, "w", encoding="utf-8") as f:
+                        f.write(resp.text)
+                    log(f"[源] 在线拉取成功，已保存本地缓存")
+                except Exception as exc:
+                    log(f"[源] 保存本地缓存失败（不影响本次）: {exc}")
+            return _rows_to_configs(rows)
+    except Exception as exc:
+        log(f"[源] 在线拉取失败: {exc}")
+
+    # 在线失败，用本地缓存
+    if feed_file and os.path.exists(feed_file):
+        log(f"[源] 使用本地缓存: {feed_file}")
+        rows = _read_local(feed_file)
+        if rows:
+            return _rows_to_configs(rows)
+
+    vp.die("feed 获取失败：本地无缓存且在线拉取失败")
 
 def _scene_ok(node: dict, scene: str) -> bool:
     if scene == "all":
@@ -225,6 +273,9 @@ def run(argv=None):
     ap.add_argument("--scene", default="support", choices=["support", "game", "speed", "ai", "all"],
                     help="场景通道（默认 support 客服稳连）")
     ap.add_argument("--data", default=os.path.join("web", "data.json"), help="data.json 路径（无则按 feed 兜底）")
+    ap.add_argument("--feed-file", default=os.path.join(vp.REPO_DIR, "feed.csv"),
+                    help="本地 feed 文件（主模式：存在则直接读；不存在则在线拉取并保存）")
+    ap.add_argument("--refresh", action="store_true", help="强制在线拉取 feed（忽略本地缓存）")
     ap.add_argument("--limit", type=int, default=8, help="最多尝试多少个候选节点")
     ap.add_argument("--out-dir", default=os.path.join(vp.REPO_DIR, "ovpn_out"), help=".ovpn 输出目录")
     ap.add_argument("--dry-run", action="store_true", help="只选节点+生成配置，不启动 OpenVPN")
@@ -240,7 +291,9 @@ def run(argv=None):
         log(f"[数据] 未找到 {args.data}，按 feed 账面分兜底排序")
 
     log(f"[源] 抓取 VPN Gate feed 获取 OpenVPN 配置 ...")
-    feed_configs = fetch_feed_configs()
+    if args.refresh:
+        log("[源] --refresh 强制在线拉取（忽略本地缓存）")
+    feed_configs = fetch_feed_configs(feed_file=None if args.refresh else args.feed_file)
     if not feed_configs:
         vp.die("feed 未返回任何 OpenVPN 配置")
 
