@@ -398,7 +398,8 @@ export default {
 								完整优选IP = 完整优选IP.concat(优选生成器IP数组);
 								其他节点LINK += 优选生成器其他节点;
 							}
-							const ECHLINK参数 = config_JSON.ECH ? `&ech=${encodeURIComponent((config_JSON.ECHConfig.SNI ? config_JSON.ECHConfig.SNI + '+' : '') + config_JSON.ECHConfig.DNS)}` : '';
+							// ECH 参数不嵌入节点链接（客户端不支持 ech 查询参数，会导致解析报错；ECH 在 TLS 握手时自动通过 DNS HTTPS 记录处理）
+							const ECHLINK参数 = '';
 							const isLoonOrSurge = ua.includes('loon') || ua.includes('surge');
 							const { type: 传输协议, 路径字段名, 域名字段名 } = 获取传输协议配置(config_JSON);
 							订阅内容 = 其他节点LINK + 完整优选IP.map(原始地址 => {
