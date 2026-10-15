@@ -1,0 +1,89 @@
+name: VPN Gate Node Check
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"  # 每 30 分钟巡检一次，契合 VPN Gate 节点生命周期
+  workflow_dispatch:        # 支持在 GitHub 网页上手动点击运行
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: gate-check
+  cancel-in-progress: true  # 上一轮卡死未完成则取消，防止任务堆积
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25     # 单轮上限 25 分钟 < 30 分钟周期，异常轮次不会互相掐死
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: pip install -r requirements.txt
+
+      - name: Get VPN Gate nodes + check via Cloudflare Worker + build page
+        working-directory: frontend
+        run: python vpngate.py
+        env:
+          # 并发 16：足够快，又不会瞬间打爆 Cloudflare Worker 免费版导致你正在用的连接掉线
+          CHECK_CONCURRENCY: "16"
+          CHECK_TIMEOUT: "45"
+          # 开启入选节点二次复测（防闪断 + 测抖动）
+          DOUBLE_CHECK_TOP: "1"
+          # 检测 Worker 地址：只从 Secrets 读，未配置则脚本直接失败退出（源码不存私有地址）
+          CHECK_WORKER: ${{ secrets.WORKER_CHECK_URL }}
+          WORKER_CHECK_URL: ${{ secrets.WORKER_CHECK_URL }}
+          PUBLIC_DIR: "./web"
+          # 每个国家精选保留的最优节点数（调大以保存更多备用节点）
+          MAX_PER_COUNTRY: "12"
+          # SSTP 凭证（公开中继默认 vpn:vpn，可在 Secrets 覆盖）
+          SSTP_USER: ${{ secrets.SSTP_USER || 'vpn' }}
+          SSTP_PASS: ${{ secrets.SSTP_PASS || 'vpn' }}
+          # 可选：限制每轮检测节点上限（0 = 不限制；feed 极大时可设 300~500 控制时长）
+          MAX_CHECK_NODES: "0"
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./frontend/web
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+      - name: Show site URL & Subscription Links
+        run: |
+          echo "✅ Site deployed successfully"
+          echo ""
+          echo "📦 生成的文件:"
+          echo "   - data.json               → 完整结构化数据（含四场景评级）"
+          echo "   - index.html              → 四场景可视化页面"
+          echo "   - nodes.txt               → 🌍 全量精选（EdgeTunnel 自定义优选格式）"
+          echo "   - nodes_support.txt       → ⭐ 客服稳连（干净IP+住宅+长在线+低抖动）"
+          echo "   - nodes_game.txt          → 🎮 游戏（低延迟+低抖动）"
+          echo "   - nodes_speed.txt         → ⬇️ 下载（高带宽优先）"
+          echo "   - nodes_ai.txt            → 🤖 国外AI（干净IP+长在线）"
+          echo "   - subscription.txt        → 通用订阅 (Hiddify/Clash/Sing-box)"
+          echo "   - subscription_base64.txt → Base64 编码订阅"
+          echo ""
+          echo "🔗 订阅链接:"
+          echo "   ⭐ 客服稳连: https://${{ github.repository_owner }}.github.io/gate-system/nodes_support.txt"
+          echo "   🎮 游戏:     https://${{ github.repository_owner }}.github.io/gate-system/nodes_game.txt"
+          echo "   ⬇️ 下载:     https://${{ github.repository_owner }}.github.io/gate-system/nodes_speed.txt"
+          echo "   🤖 国外AI:   https://${{ github.repository_owner }}.github.io/gate-system/nodes_ai.txt"
+          echo "   🌍 全量:     https://${{ github.repository_owner }}.github.io/gate-system/nodes.txt"
