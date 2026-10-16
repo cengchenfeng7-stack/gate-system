@@ -32,18 +32,13 @@ jobs:
           cd frontend
           python vpngate.py
 
-      - name: Upload web artifacts
-        uses: actions/upload-artifact@v4
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
         with:
-          name: web-artifacts
-          path: frontend/web/
+          path: frontend/web
 
       - name: Deploy to GitHub Pages
-        uses: peaceiris/actions-gh-pages@v4
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./frontend/web
-          destination_dir: .
+        uses: actions/deploy-pages@v4
 
       - name: Notify on failure
         if: failure()
