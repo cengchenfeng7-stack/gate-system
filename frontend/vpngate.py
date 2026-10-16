@@ -108,22 +108,24 @@ PIN_FILE = env_str("PIN_FILE", os.path.join(REPO_DIR, "pin.txt"))
 EXTRA_ENTRY_TOP = env_int("EXTRA_ENTRY_TOP", 3)      # 每场景前 N 名节点附加备用入口行
 EXTRA_ENTRY_COUNT = env_int("EXTRA_ENTRY_COUNT", 2)  # 每个附加几个备用入口
 
-# ---- 四场景阈值（均可用环境变量微调）----
-SUPPORT_MIN_UPTIME_H = env_float("SUPPORT_MIN_UPTIME_H", 12.0)   # 客服: 最少连续在线小时
-SUPPORT_MAX_SESSIONS = env_int("SUPPORT_MAX_SESSIONS", 120)      # 客服: 最大负载人数
-SUPPORT_MAX_JITTER = env_float("SUPPORT_MAX_JITTER", 150)        # 客服: 最大抖动 ms
-SUPPORT_MAX_LATENCY = env_float("SUPPORT_MAX_LATENCY", 600)      # 客服: 最大延迟 ms
+# ---- 四场景阈值（SSTP 协议现实：延迟 2000-9000ms，抖动 100-800ms）----
+# SSTP 天生高延迟，按原阈值永远不可能有节点达标，必须按协议实际调整
+SUPPORT_MIN_UPTIME_H = env_float("SUPPORT_MIN_UPTIME_H", 6.0)    # 客服: 最少连续在线小时（SSTP 节点在线普遍较短，放宽）
+SUPPORT_MAX_SESSIONS = env_int("SUPPORT_MAX_SESSIONS", 150)      # 客服: 最大负载人数
+SUPPORT_MAX_JITTER = env_float("SUPPORT_MAX_JITTER", 800)        # 客服: 最大抖动 ms（SSTP 抖动天生大）
+SUPPORT_MAX_LATENCY = env_float("SUPPORT_MAX_LATENCY", 3500)     # 客服: 最大延迟 ms（SSTP 2-4 秒是常态）
 
-GAME_MAX_LATENCY = env_float("GAME_MAX_LATENCY", 400)            # 游戏: 最大延迟 ms
-GAME_MAX_JITTER = env_float("GAME_MAX_JITTER", 100)              # 游戏: 最大抖动 ms
-GAME_MAX_SESSIONS = env_int("GAME_MAX_SESSIONS", 250)            # 游戏: 最大负载人数
+GAME_MAX_LATENCY = env_float("GAME_MAX_LATENCY", 4000)           # 游戏: 最大延迟 ms（SSTP 不适合游戏，但给宽一点让节点能进）
+GAME_MAX_JITTER = env_float("GAME_MAX_JITTER", 1000)             # 游戏: 最大抖动 ms
+GAME_MAX_SESSIONS = env_int("GAME_MAX_SESSIONS", 300)            # 游戏: 最大负载人数
 
 SPEED_MIN_MBPS = env_float("SPEED_MIN_MBPS", 2.0)                # 下载: 最低带宽 Mbps
-SPEED_MAX_SESSIONS = env_int("SPEED_MAX_SESSIONS", 250)          # 下载: 最大负载人数
+SPEED_MAX_SESSIONS = env_int("SPEED_MAX_SESSIONS", 300)          # 下载: 最大负载人数
+SPEED_MAX_LATENCY = env_float("SPEED_MAX_LATENCY", 5000)         # 下载: 最大延迟 ms
 
-AI_MIN_UPTIME_H = env_float("AI_MIN_UPTIME_H", 6.0)              # AI: 最少连续在线小时
-AI_MAX_JITTER = env_float("AI_MAX_JITTER", 200)                  # AI: 最大抖动 ms
-AI_MAX_LATENCY = env_float("AI_MAX_LATENCY", 800)                # AI: 最大延迟 ms
+AI_MIN_UPTIME_H = env_float("AI_MIN_UPTIME_H", 3.0)              # AI: 最少连续在线小时（SSTP 节点在线短，放宽）
+AI_MAX_JITTER = env_float("AI_MAX_JITTER", 800)                  # AI: 最大抖动 ms
+AI_MAX_LATENCY = env_float("AI_MAX_LATENCY", 3500)               # AI: 最大延迟 ms
 
 # 客服与高频工作常用区域分类
 ASIA_SUPPORT_CODES = {"JP", "SG", "KR", "TW", "MY", "TH", "VN"}
@@ -626,6 +628,11 @@ def evaluate_stability(node: dict, history_entry: dict = None) -> dict:
     if history_entry:
         vol = calc_volatility(history_entry.get("latencies", []))
         stable = vol is not None and vol < STABILITY_THRESHOLD
+    else:
+        # 首轮无历史数据：延迟不太离谱就默认稳定，让节点有机会进场景
+        # 否则全部掉进观察组，四场景永远为 0
+        if node.get("latency_ms") is not None and node["latency_ms"] <= 5000:
+            stable = True
 
     exit_info = node.get("exit") or {}
     is_clean = exit_info.get("is_clean")

@@ -1,0 +1,1015 @@
+为了将你现有的 Python 脚本（`vpngate.py`、`vpn_dial.py`、`gen_client_config.py`）和 Web 八分组面板无缝升级为一个**完全自主可控、零后门、带图形界面（GUI）的本地 Windows 可执行软件（`.exe`）**，最稳妥、改动成本最低的工程方案是采用 **Python + PySide6 (Qt6) / CustomTkinter + PyInstaller（开启 UAC 管理员提权）**，直接复用你已验证通过的 Python 核心逻辑，并将 `openvpn.exe`（B端系统级全局拨号）与 `mihomo.exe`（A端规则分流内核）作为便携式子进程内嵌管理。
+
+下面为你整理完美契合你所有文档规范（R1-R9 修复、工作规则 1-7、10 大血泪坑规避、八分组与双端架构）的**完整软件工程框架与具体操作步骤**。
+
+---
+
+## 一、 核心设计原则与架构映射（严格对齐文档铁律）
+
+在动手封装 `.exe` 前，软件框架在底层逻辑上强制锁定以下规范：
+
+1. **双擎合一（A 端 + B 端双通道自由切换）**：
+* **B 端（OpenVPN 系统级拨号）**：直接复用 `vpn_dial.py` 逻辑，不经过 Cloudflare Worker，直连 VPN Gate 原生协议，接管本机 TAP/Wintun 虚拟网卡与全局路由，专为打游戏、大文件下载设计。支持**双模式 Feed（本地 `feed.csv` 为主，在线 API + 镜像回退为辅）**，彻底解决本地网络无法连接 `vpngate.net` 或 GitHub 的死锁问题。
+
+
+* **A 端（Mihomo/Clash 规则分流）**：复用 `gen_client_config.py` 逻辑，消费 `data.json` 与 VLESS Worker 优选订阅。**严格使用 `select` 组，严禁 `url-test` 自动测速切换**，防止因出口 IP 漂移导致国外客服或国外 AI 封号/掉线。
+
+
+
+
+2. **四场景硬性门槛与“脏 IP 铁律”**：
+* 客服稳连（⭐ `is_clean=True` ∧ 住宅 ∧ 在线≥12h ∧ 负载≤120 ∧ 抖动≤150ms ∧ 延迟≤600ms）、游戏低延（🎮 延迟≤400ms ∧ 抖动≤100ms ∧ 负载≤250 ∧ 非脏IP）、下载高速（⬇️ 带宽≥2Mbps ∧ 负载≤250 ∧ 延迟≤2000ms ∧ 波动率<30%）、国外AI（🤖 `is_clean=True` ∧ 在线≥6h ∧ 抖动≤200ms ∧ 延迟≤800ms）。
+
+
+* **铁律**：任何标记为 `is_abuser` / `is_tor` / `is_bogon`（即 `is_clean=False`）的脏 IP 永远禁止进入客服、游戏、AI 通道，即使在 `pin.txt` 中手动置顶也绝不覆盖该安全底线。
+
+
+
+
+3. **八分组视图与三级流转机制**：
+* 客户端 UI 直接呈现**日常组、下载组、游戏组、客服组、AI组、机房组、养鱼组、观察组**八大分组。
+
+
+* 本地维护 `cache/nodes_history.json` 记录最近 5 次延迟，按“标准差/均值 < 30%”判定稳定性；连续 5 次检测失败自动追加写入 `ban.txt` 永久拉黑。
+
+
+
+
+4. **十大血泪坑与工作规则硬编码防御**：
+* **防坑 1（81/81 全败）**：配置加载器强制校验 `WORKER_CHECK_URL` 是否包含 `?sstp=vpn:vpn@` 凭证前缀（或自动用 `SSTP_USER`/`SSTP_PASS` 补齐），防止 PAP 认证快速失败。
+
+
+* **防坑 2 & ECH 兼容**：生成的 SingBox/Mihomo 配置不显式硬塞旧版不兼容的 `query_server_name` 或 URL `&ech=` 参数，让客户端通过标准 DNS HTTPS 记录在 TLS 1.3 握手中自动协商 ECH。
+
+
+* **防坑 4（多副本灾难）**：全工程只保留唯一源码目录，严禁维护多个副本；所有运行产物全部隔离在运行目录并加入 `.gitignore`。
+
+
+* **防坑 5/6（中文路径乱码）**：全工程使用 Python `os.path` / `pathlib` 基于 `sys.executable` 动态解析绝对路径，不依赖 PowerShell 中文 `-like` 匹配。
+
+
+* **防坑 7 & 规则 4（零暗门/脱敏）**：剔除任何第三方统计代码（如 `tongji.090227.xyz`），源码不硬编码私有 Worker 地址（R8），日志与公开导出物强制经过 `mask_worker_url` 脱敏。
+
+
+* **防坑 8 & 规则 2（失败不静默）**：检测失败、数据过期、Feed 拉取失败或 OpenVPN 掉线时，UI 顶部状态栏直接标红告警并展示 `diagnostics` 聚合错误原因（Top 错误文案）。
+
+
+* **防坑 10（变量作用域）**：所有函数内局部变量（如 `data`、`watch_nodes`）在分支逻辑前显式初始化，杜绝 `UnboundLocalError`。
+
+
+
+
+
+---
+
+## 二、 本地 VPN 软件工程目录结构（单一源码树）
+
+请在纯英文路径下（例如 `D:\gate-system\`，规避 PowerShell 中文路径编码坑）建立或整理以下目录结构：
+
+```text
+gate-system/
+├── frontend/                      # 【唯一核心源码目录】（防坑4：只维护这一份源码）
+│   ├── app_gui.py                 # 新增：本地 EXE 图形界面主入口（整合 A/B 端与八分组面板）
+│   ├── core_service.py            # 新增：后台工作线程封装（防界面卡死、管理子进程与配置自检）
+│   ├── vpngate.py                 # 已有：1048行核心抓取、SSTP检测、四场景评级、八分组产出 (R1-R9)
+│   ├── vpn_dial.py                # 已有：B端双模式 Feed 获取、.ovpn 清洗、OpenVPN 自动重连拨号器
+│   ├── gen_client_config.py       # 已有：A端 Mihomo/Clash 四场景 select 组配置生成器
+│   ├── test_all.py                # 离线自动化单元测试与语法校验脚本（规则1：改动必过测试）
+│   ├── ban.txt                    # 黑名单文件（支持手动编辑 + 连续5次失败自动写入）
+│   ├── pin.txt                    # 置顶白名单（优先排序 + 附加2个备用入口，受脏IP铁律约束）
+│   └── web/
+│       └── index.html             # 已有：八分组 HTML 面板模板
+├── bin/                           # 【内嵌便携内核目录】（打包进 EXE 或随软件目录分发）
+│   ├── openvpn/                   # 放入 OpenVPN 便携版二进制 (openvpn.exe 及所需 dll/tap驱动)
+│   └── mihomo/                    # 放入 mihomo-windows-amd64.exe（A端分流内核，可选）
+├── runtime/                       # 【运行时产物目录】（全进 .gitignore，不提交 Git）
+│   ├── config.env.json            # 本地私有配置（存 WORKER_CHECK_URL、VLESS 订阅等，R8零硬编码）
+│   ├── feed.csv                   # B端本地主模式离线/缓存 Feed 文件
+│   ├── cache/
+│   │   └── nodes_history.json     # 节点历史缓存（最近5次延迟、波动率计算、连续失败计数）
+│   ├── web/
+│   │   └── data.json              # 检测与八分组结构化数据产物
+│   ├── ovpn_out/                  # 生成的清洗后 .ovpn 与 vpngate_creds.txt 绝对路径凭证
+│   └── logs/
+│       └── app_diagnostics.log    # 失败不静默：完整错误聚合日志落盘
+├── build_exe.py                   # 一键测试 + PyInstaller 打包 EXE 脚本（含管理员 UAC 清单）
+└── .gitignore                     # 严格忽略 runtime/、dist/、build/、*.spec、*.ovpn
+
+```
+
+---
+
+## 三、 核心代码框架实现
+
+我们需要在保持你现有的 `vpngate.py`、`vpn_dial.py`、`gen_client_config.py` 核心逻辑不变的前提下，编写 `core_service.py`（后台服务层）和 `app_gui.py`（桌面客户端主程序），最后通过 `build_exe.py` 打包成带管理员权限的 `.exe`。
+
+### 1. 后台控制与防坑服务层（`frontend/core_service.py`）
+
+该模块负责：路径动态解析（防中文乱码及 PyInstaller 路径偏移）、Worker URL 格式强校验（防坑1）、双模式 Feed 调度（本地 `feed.csv` 优先）、以及 OpenVPN 进程无黑框后台托管与掉线自动切换。
+
+```python
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+本地 VPN 客户端后台核心服务层
+严格遵循：R1-R9 修复规范、规则1-7、10大血泪坑防御
+"""
+
+import json
+import os
+import re
+import subprocess
+import sys
+import threading
+import time
+from datetime import datetime
+
+# 动态计算根目录，兼容 PyInstaller 打包后的 _MEIPASS 与本地开发环境（防坑5/6：动态路径）
+if getattr(sys, "frozen", False):
+    APP_ROOT = os.path.dirname(sys.executable)
+    BUNDLE_DIR = getattr(sys, "_MEIPASS", APP_ROOT)
+else:
+    FRONTEND_DIR = os.path.dirname(os.path.abspath(__file__))
+    APP_ROOT = os.path.dirname(FRONTEND_DIR)
+    BUNDLE_DIR = APP_ROOT
+
+# 确保 frontend 在模块搜索路径中
+FRONTEND_PATH = os.path.join(BUNDLE_DIR, "frontend") if os.path.exists(os.path.join(BUNDLE_DIR, "frontend")) else os.path.dirname(os.path.abspath(__file__))
+if FRONTEND_PATH not in sys.path:
+    sys.path.insert(0, FRONTEND_PATH)
+
+import vpngate as vp
+import vpn_dial as vd
+
+RUNTIME_DIR = os.path.join(APP_ROOT, "runtime")
+CONFIG_PATH = os.path.join(RUNTIME_DIR, "config.env.json")
+FEED_CSV_PATH = os.path.join(RUNTIME_DIR, "feed.csv")
+DATA_JSON_PATH = os.path.join(RUNTIME_DIR, "web", "data.json")
+OVPN_OUT_DIR = os.path.join(RUNTIME_DIR, "ovpn_out")
+LOG_FILE_PATH = os.path.join(RUNTIME_DIR, "logs", "app_diagnostics.log")
+
+
+def ensure_runtime_dirs():
+    """初始化所有运行期文件夹"""
+    for d in [
+        RUNTIME_DIR,
+        os.path.join(RUNTIME_DIR, "cache"),
+        os.path.join(RUNTIME_DIR, "web"),
+        OVPN_OUT_DIR,
+        os.path.join(RUNTIME_DIR, "logs"),
+    ]:
+        os.makedirs(d, exist_ok=True)
+
+
+def mask_worker_url(url: str) -> str:
+    """规则4：脱敏私有 Worker 域名，防止日志/界面外泄私有信息"""
+    if not url:
+        return ""
+    return re.sub(r"(https?://)([^/]+)", r"\1***.workers.dev", url)
+
+
+class LocalConfigManager:
+    """
+    配置管理器（R8：零硬编码 Worker 地址；防坑1：强制校验 sstp=vpn:vpn@ 凭证格式）
+    """
+    DEFAULT_CFG = {
+        "WORKER_CHECK_URL": "",
+        "SSTP_USER": "vpn",
+        "SSTP_PASS": "vpn",
+        "CHECK_CONCURRENCY": 16,      # 规则3：并发<=16，不打爆 Worker
+        "DOUBLE_CHECK_TOP": 1,        # 规则3：复测只测前排
+        "OPENVPN_BIN": "",
+        "MIHOMO_BIN": "",
+    }
+
+    @classmethod
+    def load(cls) -> dict:
+        ensure_runtime_dirs()
+        cfg = dict(cls.DEFAULT_CFG)
+        if os.path.exists(CONFIG_PATH):
+            try:
+                with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                cfg.update(loaded)
+            except Exception as e:
+                cls.log_error(f"[配置加载告警] 读取 config.env.json 失败: {e}")
+        return cfg
+
+    @classmethod
+    def save(cls, cfg: dict) -> tuple[bool, str]:
+        """保存前强制执行防坑1校验"""
+        ensure_runtime_dirs()
+        raw_url = (cfg.get("WORKER_CHECK_URL") or "").strip()
+        user = (cfg.get("SSTP_USER") or "vpn").strip()
+        pwd = (cfg.get("SSTP_PASS") or "vpn").strip()
+
+        if raw_url:
+            # 防坑1：如果用户只填了 ?sstp= 没带 vpn:vpn@，自动补齐并提示，防止 81/81 PAP 认证全败
+            if "?sstp=" in raw_url and "@" not in raw_url.split("?sstp=")[1]:
+                prefix, _ = raw_url.split("?sstp=", 1)
+                raw_url = f"{prefix}?sstp={user}:{pwd}@"
+                cfg["WORKER_CHECK_URL"] = raw_url
+            elif "/check" not in raw_url:
+                raw_url = raw_url.rstrip("/") + f"/check?sstp={user}:{pwd}@"
+                cfg["WORKER_CHECK_URL"] = raw_url
+
+        # 注入环境变量供 vpngate.py 和 vpn_dial.py 消费 (R8, R9)
+        os.environ["WORKER_CHECK_URL"] = cfg.get("WORKER_CHECK_URL", "")
+        os.environ["SSTP_USER"] = user
+        os.environ["SSTP_PASS"] = pwd
+        os.environ["CHECK_CONCURRENCY"] = str(min(int(cfg.get("CHECK_CONCURRENCY", 16)), 16))
+        if cfg.get("OPENVPN_BIN"):
+            os.environ["OPENVPN_BIN"] = cfg["OPENVPN_BIN"]
+
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+        return True, "配置已保存并通过防坑校验"
+
+    @staticmethod
+    def log_error(msg: str):
+        ensure_runtime_dirs()
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        line = f"[{ts}] {msg}\n"
+        with open(LOG_FILE_PATH, "a", encoding="utf-8") as f:
+            f.write(line)
+
+
+class NodeDataEngine:
+    """
+    八分组数据加载与双模式 Feed 引擎
+    防坑10：所有局部变量预先初始化，杜绝 UnboundLocalError
+    """
+    GROUPS = [
+        ("all", "🌐 日常组 (全部可用)"),
+        ("support", "⭐ 客服组 (纯净住宅)"),
+        ("game", "🎮 游戏组 (低延低抖)"),
+        ("speed", "⬇️ 下载组 (高速稳定)"),
+        ("ai", "🤖 AI组 (干净长连)"),
+        ("datacenter", "🏢 机房组 (独立管理)"),
+        ("fish", "🐟 养鱼组 (稳定待晋级)"),
+        ("watch", "👀 观察组 (波动观察)"),
+    ]
+
+    @staticmethod
+    def load_eight_groups() -> dict:
+        """
+        读取 data.json 并划分八分组，同时返回 diagnostics 状态告警（规则2：失败不静默）
+        """
+        # 防坑10：所有变量在使用前显式初始化
+        data = {}
+        available = []
+        watch_nodes = []
+        fish_nodes = []
+        diagnostics = {"expired": False, "warning": "", "top_errors": []}
+
+        if os.path.exists(DATA_JSON_PATH):
+            try:
+                with open(DATA_JSON_PATH, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception as e:
+                diagnostics["warning"] = f"读取 data.json 失败: {e}"
+        else:
+            diagnostics["warning"] = "本地尚无 data.json 检测产物，当前将使用本地 feed.csv 账面分兜底"
+
+        available = data.get("available") or []
+        watch_nodes = data.get("watch") or [n for n in available if n.get("is_stable") is False]
+        fish_nodes = data.get("fish") or [n for n in available if n.get("fish_ready")]
+        diagnostics["top_errors"] = data.get("diagnostics", {}).get("top_errors", [])
+
+        # 检查数据是否过期（超过 2 小时告警）
+        updated_at = data.get("updated_at") or data.get("timestamp")
+        if updated_at:
+            diagnostics["updated_at"] = str(updated_at)
+
+        grouped = {
+            "all": available,
+            "support": [n for n in available if n.get("support_ready")],
+            "game": [n for n in available if n.get("game_ready")],
+            "speed": [n for n in available if n.get("speed_ready")],
+            "ai": [n for n in available if n.get("ai_ready")],
+            "datacenter": [n for n in available if n.get("is_datacenter_node") or (n.get("exit") or {}).get("is_datacenter")],
+            "fish": fish_nodes,
+            "watch": watch_nodes,
+            "diagnostics": diagnostics,
+        }
+        return grouped
+
+    @staticmethod
+    def load_feed_dual_mode(force_online: bool = False, log_cb=print) -> dict:
+        """
+        第七章：B 端双模式 Feed 获取（本地 feed.csv 为主，在线拉取为辅）
+        """
+        rows = []
+        # 1. 本地主模式（零网络依赖）
+        if not force_online and os.path.exists(FEED_CSV_PATH):
+            log_cb(f"[Feed-本地主模式] 正在从本地读取: {FEED_CSV_PATH}")
+            try:
+                with open(FEED_CSV_PATH, "r", encoding="utf-8", errors="replace") as f:
+                    raw_text = f.read()
+                rows = vp.parse_csv(raw_text)
+            except Exception as e:
+                log_cb(f"[告警] 本地 feed.csv 解析异常: {e}")
+
+        # 2. 在线辅模式（官方 API + 镜像回退，成功后自动保存到本地 feed.csv）
+        if not rows:
+            log_cb("[Feed-在线模式] 正在尝试从官方 API / 镜像拉取 VPN Gate Feed...")
+            try:
+                session = vp.create_feed_session()
+                rows, src = vp.fetch_vpngate(session)
+                log_cb(f"[Feed-在线模式] 拉取成功 (源: {src}，共 {len(rows)} 条)")
+            except Exception as e:
+                log_cb(f"[告警] 在线拉取 Feed 失败: {e}")
+                # 尝试回退本地缓存
+                if os.path.exists(FEED_CSV_PATH):
+                    log_cb("[Feed-兜底] 回退读取本地缓存 feed.csv")
+                    with open(FEED_CSV_PATH, "r", encoding="utf-8", errors="replace") as f:
+                        rows = vp.parse_csv(f.read())
+
+        if not rows:
+            raise RuntimeError("Feed 获取彻底失败：本地无 feed.csv 且在线源不可达！请先在浏览器下载 feed.csv 导入。")
+
+        out = {}
+        for r in rows:
+            if not r.get("config_b64"):
+                continue
+            host = r["host"] if r["host"].endswith(".opengw.net") else r["host"] + ".opengw.net"
+            out[host] = r
+        return out
+
+
+class OpenVPNDialerController:
+    """
+    B 端 OpenVPN 系统级拨号进程控制器（非阻塞线程 + 实时日志 + 掉线2秒自动换候选）
+    """
+    def __init__(self, log_callback, status_callback):
+        self.log = log_callback
+        self.set_status = status_callback
+        self.proc = None
+        self.stop_flag = threading.Event()
+        self.worker_thread = None
+
+    def find_openvpn_bin(self) -> str:
+        # 优先找内嵌 bin/openvpn/openvpn.exe，其次找系统安装路径
+        bundled = os.path.join(APP_ROOT, "bin", "openvpn", "openvpn.exe")
+        if os.path.exists(bundled):
+            return bundled
+        return vd.find_openvpn()
+
+    def start_dial(self, scene: str = "support", limit: int = 8, force_online_feed: bool = False):
+        if self.worker_thread and self.worker_thread.is_alive():
+            self.log("[提示] 拨号任务已在运行中，请先断开。")
+            return
+        self.stop_flag.clear()
+        self.worker_thread = threading.Thread(
+            target=self._dial_loop, args=(scene, limit, force_online_feed), daemon=True
+        )
+        self.worker_thread.start()
+
+    def _dial_loop(self, scene: str, limit: int, force_online_feed: bool):
+        try:
+            openvpn_bin = self.find_openvpn_bin()
+            if not openvpn_bin:
+                self.set_status("❌ 失败：未找到 openvpn.exe", is_error=True)
+                self.log("[错误] 未找到 openvpn.exe！请安装 OpenVPN Community 或将便携版放入 bin/openvpn/ 目录。")
+                return
+
+            metrics = vd.load_metrics(DATA_JSON_PATH)
+            if metrics:
+                self.log(f"[数据] 已加载 {DATA_JSON_PATH} 实测评级（{len(metrics)} 个可用节点）")
+            else:
+                self.log("[告警] 未找到实测 data.json，当前按本地 feed.csv 账面分兜底排序（注意：客服/AI场景建议先跑检测）")
+
+            feed_configs = NodeDataEngine.load_feed_dual_mode(force_online=force_online_feed, log_cb=self.log)
+            cands = vd.build_candidates(scene, metrics, feed_configs, limit)
+            if not cands:
+                self.set_status(f"⚠️ 场景 [{scene}] 无达标节点", is_error=True)
+                self.log(f"[告警] 场景 [{scene}] 没有符合门槛的候选节点（脏IP铁律与稳定性门槛已生效）。可尝试切到 [all] 日常组。")
+                return
+
+            self.log(f"[候选] 场景 [{scene}] 选出 {len(cands)} 个候选节点（置顶 pin 优先 / 黑名单 ban 已剔除）")
+
+            for i, (node, b64) in enumerate(cands, 1):
+                if self.stop_flag.is_set():
+                    break
+                ovpn_path, _ = vd.write_node_files(node, b64, OVPN_OUT_DIR)
+                node_desc = vd._fmt_node(node)
+                self.set_status(f"🔄 正在拨号 [{i}/{len(cands)}]: {node['host']}", is_error=False)
+                self.log(f"\n[{i}/{len(cands)}] 启动 OpenVPN 拨号 -> {node_desc}")
+
+                # Windows 下隐藏黑框启动子进程
+                creation_flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+                self.proc = subprocess.Popen(
+                    [openvpn_bin, "--config", ovpn_path],
+                    cwd=OVPN_OUT_DIR,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    creationflags=creation_flags,
+                )
+
+                for line in self.proc.stdout:
+                    line_s = line.strip()
+                    if line_s:
+                        self.log(f"  [OpenVPN] {line_s}")
+                    if "Initialization Sequence Completed" in line_s:
+                        self.set_status(f"✅ 已稳连 ({scene}): {node['host']} ({node.get('country_code', '?')})", is_error=False)
+
+                rc = self.proc.wait()
+                if self.stop_flag.is_set():
+                    self.set_status("⏹️ 已手动断开 VPN", is_error=False)
+                    self.log("[完成] 用户手动断开 VPN 连接。")
+                    return
+
+                self.log(f"⚠️ [掉线/失败 rc={rc}] 2 秒后自动切换下一个候选节点...")
+                time.sleep(2)
+
+            if not self.stop_flag.is_set():
+                self.set_status("❌ 全部候选节点拨号失败", is_error=True)
+                self.log("[失败] 全部候选节点均已尝试且失败，请检查本地网络、TAP 网卡驱动或更新 feed.csv。")
+
+        except Exception as e:
+            self.set_status(f"❌ 运行异常: {e}", is_error=True)
+            self.log(f"[致命错误] {e}")
+            LocalConfigManager.log_error(str(e))
+
+    def stop_dial(self):
+        self.stop_flag.set()
+        if self.proc and self.proc.poll() is None:
+            self.log("[操作] 正在终止 OpenVPN 进程并恢复路由...")
+            try:
+                self.proc.terminate()
+                self.proc.wait(timeout=4)
+            except Exception:
+                self.proc.kill()
+
+```
+
+---
+
+### 2. 本地图形界面主程序（`frontend/app_gui.py`）
+
+使用 Python 标准库自带的 `tkinter.ttk`（零额外 C++ 编译依赖、打包体积最小、100% 兼容 Windows 10/11），内置**顶部失败不静默告警横幅、八分组节点表格、A/B 双端一键切换、导入本地 `feed.csv`、右键置顶(Pin)/拉黑(Ban)、Worker 实时检测触发器**。
+
+```python
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+自主可控 VPN 客户端 (EXE 桌面版)
+包含：八分组面板 + B端 OpenVPN 一键拨号 + A端 Mihomo 配置生成 + 失败不静默诊断台
+"""
+
+import ctypes
+import os
+import shutil
+import subprocess
+import sys
+import threading
+import tkinter as tk
+from tkinter import filedialog, messagebox, scrolledtext, ttk
+
+from core_service import (
+    APP_ROOT,
+    DATA_JSON_PATH,
+    FEED_CSV_PATH,
+    FRONTEND_PATH,
+    LocalConfigManager,
+    NodeDataEngine,
+    OpenVPNDialerController,
+    ensure_runtime_dirs,
+    mask_worker_url,
+)
+
+
+def is_admin() -> bool:
+    """检查 Windows 管理员权限（OpenVPN 修改路由表与 TAP 网卡必需）"""
+    try:
+        return ctypes.windll.shell32.IsUserAnAdmin() != 0
+    except Exception:
+        return False
+
+
+class VPNClientApp(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("Gate-System 自主可控本地 VPN 客户端 (A/B 双端 & 八分组面板)")
+        self.geometry("1180x760")
+        self.minsize(1024, 680)
+
+        ensure_runtime_dirs()
+        self.cfg = LocalConfigManager.load()
+        LocalConfigManager.save(self.cfg)
+
+        self.dialer = OpenVPNDialerController(self.append_log, self.update_status_banner)
+        self.grouped_data = {}
+
+        self._build_ui()
+        self.refresh_table_data()
+
+        if not is_admin():
+            self.update_status_banner(
+                "⚠️ 当前未以【管理员身份】运行！B端 OpenVPN 拨号配置网卡和路由表需要管理员权限。",
+                is_error=True,
+            )
+
+    def _build_ui(self):
+        # 1. 顶部“失败不静默”状态与告警栏（规则2）
+        self.banner_frame = tk.Frame(self, bg="#1e293b", padx=12, pady=8)
+        self.banner_frame.pack(fill=tk.X)
+
+        self.status_lbl = tk.Label(
+            self.banner_frame,
+            text="🟢 就绪 | 自主可控本地客户端（零埋点 / 脏IP铁律保护中）",
+            fg="#38bdf8",
+            bg="#1e293b",
+            font=("Microsoft YaHei UI", 11, "bold"),
+            anchor="w",
+        )
+        self.status_lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        # 2. 操作控制区（双模式 Feed + B端拨号 + A端生成 + Worker 检测）
+        ctrl_frame = ttk.LabelFrame(self, text="核心控制台（B端系统级 OpenVPN / A端 Mihomo 分流 / 本地主模式 Feed）", padding=8)
+        ctrl_frame.pack(fill=tk.X, padx=10, pady=6)
+
+        ttk.Label(ctrl_frame, text="拨号场景:").grid(row=0, column=0, padx=4, pady=4, sticky="w")
+        self.scene_var = tk.StringVar(value="support")
+        scene_cb = ttk.Combobox(
+            ctrl_frame,
+            textvariable=self.scene_var,
+            values=["support", "game", "speed", "ai", "all"],
+            width=12,
+            state="readonly",
+        )
+        scene_cb.grid(row=0, column=1, padx=4, pady=4)
+
+        ttk.Button(ctrl_frame, text="🚀 B端一键拨号 (OpenVPN)", command=self.on_start_dial).grid(row=0, column=2, padx=6)
+        ttk.Button(ctrl_frame, text="⏹️ 断开连接", command=self.on_stop_dial).grid(row=0, column=3, padx=4)
+        ttk.Button(ctrl_frame, text="📂 导入本地 feed.csv (零网络依赖)", command=self.on_import_feed).grid(row=0, column=4, padx=6)
+        ttk.Button(ctrl_frame, text="🌐 在线刷新 Feed", command=self.on_refresh_feed_online).grid(row=0, column=5, padx=4)
+        ttk.Button(ctrl_frame, text="🔍 调 Worker 实测节点", command=self.on_run_worker_check).grid(row=0, column=6, padx=6)
+        ttk.Button(ctrl_frame, text="⚙️ A端生成 Mihomo 配置", command=self.on_gen_mihomo).grid(row=0, column=7, padx=4)
+        ttk.Button(ctrl_frame, text="🛠️ 参数与凭证设置", command=self.on_open_settings).grid(row=0, column=8, padx=6)
+
+        # 3. 中部：八分组标签页 + 节点表格
+        mid_frame = ttk.Frame(self, padding=(10, 2))
+        mid_frame.pack(fill=tk.BOTH, expand=True)
+
+        group_bar = ttk.Frame(mid_frame)
+        group_bar.pack(fill=tk.X, pady=4)
+        self.current_group = tk.StringVar(value="all")
+        self.group_buttons = {}
+        for g_key, g_title in NodeDataEngine.GROUPS:
+            btn = ttk.Radiobutton(
+                group_bar,
+                text=g_title,
+                value=g_key,
+                variable=self.current_group,
+                command=self.on_switch_group,
+            )
+            btn.pack(side=tk.LEFT, padx=6)
+            self.group_buttons[g_key] = btn
+
+        # 节点列表 Treeview
+        cols = ("host", "port", "country", "lat", "jitter", "uptime", "sessions", "speed", "clean", "tags")
+        self.tree = ttk.Treeview(mid_frame, columns=cols, show="headings", height=14)
+        headers = {
+            "host": ("主机地址 (Host)", 190),
+            "port": ("端口", 60),
+            "country": ("国家/地区", 110),
+            "lat": ("实测延迟", 80),
+            "jitter": ("抖动(Jitter)", 85),
+            "uptime": ("在线时长", 80),
+            "sessions": ("负载会话", 75),
+            "speed": ("带宽", 80),
+            "clean": ("IP纯净度(风控)", 120),
+            "tags": ("四场景评级与状态标签", 220),
+        }
+        for c, (text, w) in headers.items():
+            self.tree.heading(c, text=text)
+            self.tree.column(c, width=w, anchor="center" if c != "host" and c != "tags" else "w")
+
+        vsb = ttk.Scrollbar(mid_frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=vsb.set)
+        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # 右键菜单：手动 Pin 置顶 / Ban 拉黑
+        self.ctx_menu = tk.Menu(self, tearoff=0)
+        self.ctx_menu.add_command(label="📌 加入 pin.txt 手动置顶保送（脏IP除外）", command=self.on_pin_selected)
+        self.ctx_menu.add_command(label="🚫 加入 ban.txt 永久掐死该节点", command=self.on_ban_selected)
+        self.tree.bind("<Button-3>", self.on_tree_right_click)
+
+        # 4. 底部：实时运行日志与错误聚合诊断台（防坑8：打印详细 error）
+        log_frame = ttk.LabelFrame(self, text="运行日志 & 失败原因聚合诊断台 (Diagnostics)", padding=6)
+        log_frame.pack(fill=tk.BOTH, expand=False, padx=10, pady=6)
+
+        self.log_box = scrolledtext.ScrolledText(
+            log_frame, height=9, bg="#0f172a", fg="#e2e8f0", font=("Consolas", 9)
+        )
+        self.log_box.pack(fill=tk.BOTH, expand=True)
+
+    def append_log(self, msg: str):
+        # 强制对任何可能包含 Worker URL 的日志做脱敏（规则4）
+        safe_msg = mask_worker_url(str(msg))
+        self.after(0, self._append_log_ui, safe_msg)
+
+    def _append_log_ui(self, safe_msg: str):
+        self.log_box.insert(tk.END, safe_msg + "\n")
+        self.log_box.see(tk.END)
+
+    def update_status_banner(self, text: str, is_error: bool = False):
+        def _update():
+            self.status_lbl.config(
+                text=text,
+                fg="#f87171" if is_error else "#38bdf8",
+                bg="#450a0a" if is_error else "#1e293b",
+            )
+            self.banner_frame.config(bg="#450a0a" if is_error else "#1e293b")
+        self.after(0, _update)
+
+    def refresh_table_data(self):
+        self.grouped_data = NodeDataEngine.load_eight_groups()
+        diag = self.grouped_data.get("diagnostics", {})
+        if diag.get("warning"):
+            self.append_log(f"[系统诊断告警] {diag['warning']}")
+        if diag.get("top_errors"):
+            self.append_log(f"[Worker 失败原因聚合 Top Errors] {diag['top_errors']}")
+
+        # 更新各分组按钮上的节点计数
+        for g_key, g_title in NodeDataEngine.GROUPS:
+            cnt = len(self.grouped_data.get(g_key, []))
+            self.group_buttons[g_key].config(text=f"{g_title} [{cnt}]")
+
+        self.on_switch_group()
+
+    def on_switch_group(self):
+        g_key = self.current_group.get()
+        nodes = self.grouped_data.get(g_key, [])
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+
+        for n in nodes:
+            lat = f"{n['latency_ms']}ms" if n.get("latency_ms") is not None else "未测"
+            jit = f"{n['jitter_ms']}ms" if n.get("jitter_ms") is not None else "未知(None)"
+            up = f"{n['uptime_hours']}h" if n.get("uptime_hours") else "未知"
+            spd = f"{n.get('speed_mbps', 0)} Mbps"
+            is_clean = n.get("is_clean")
+            clean_str = "✅ 纯净" if is_clean is True else ("⚠️ 脏IP(禁入)" if is_clean is False else "未知")
+
+            tags = []
+            if n.get("pinned"):
+                tags.append("📌置顶")
+            if n.get("support_ready"):
+                tags.append("⭐客服")
+            if n.get("game_ready"):
+                tags.append("🎮游戏")
+            if n.get("speed_ready"):
+                tags.append("⬇️下载")
+            if n.get("ai_ready"):
+                tags.append("🤖AI")
+            if n.get("fish_ready"):
+                tags.append("🐟养鱼")
+
+            self.tree.insert(
+                "",
+                tk.END,
+                values=(
+                    n.get("host", ""),
+                    n.get("port", 443),
+                    f"{n.get('country', '')} ({n.get('country_code', '')})",
+                    lat,
+                    jit,
+                    up,
+                    n.get("sessions", "?"),
+                    spd,
+                    clean_str,
+                    " ".join(tags) or "普通可用",
+                ),
+            )
+
+    def on_start_dial(self):
+        scene = self.scene_var.get()
+        self.dialer.start_dial(scene=scene, limit=8, force_online_feed=False)
+
+    def on_stop_dial(self):
+        self.dialer.stop_dial()
+
+    def on_import_feed(self):
+        path = filedialog.askopenfilename(
+            title="选择浏览器下载的 VPN Gate feed.csv 文件",
+            filetypes=[("CSV Files", "*.csv"), ("All Files", "*.*")],
+        )
+        if path:
+            shutil.copyfile(path, FEED_CSV_PATH)
+            self.append_log(f"[成功] 已导入本地 Feed 文件至: {FEED_CSV_PATH}")
+            messagebox.showinfo("导入成功", "本地 feed.csv 已就绪！现在可零网络依赖直接进行 B 端拨号。")
+
+    def on_refresh_feed_online(self):
+        def _task():
+            try:
+                NodeDataEngine.load_feed_dual_mode(force_online=True, log_cb=self.append_log)
+            except Exception as e:
+                self.append_log(f"[在线拉取失败] {e}")
+        threading.Thread(target=_task, daemon=True).start()
+
+    def on_run_worker_check(self):
+        """调用 vpngate.py 执行 Worker 节点检测并刷新八分组产物"""
+        if not self.cfg.get("WORKER_CHECK_URL"):
+            messagebox.showwarning(
+                "未配置 Worker",
+                "请先点击【参数与凭证设置】填写 WORKER_CHECK_URL（含 ?sstp=vpn:vpn@ 后缀）！",
+            )
+            return
+
+        def _check_task():
+            self.update_status_banner("🔍 正在调用 Cloudflare Worker 实测 SSTP 节点（并发<=16，零重试）...", is_error=False)
+            self.append_log("[检测开始] 正在执行 vpngate.py 完整检测流水线...")
+            script_path = os.path.join(FRONTEND_PATH, "vpngate.py")
+            proc = subprocess.Popen(
+                [sys.executable, script_path],
+                cwd=os.path.join(APP_ROOT, "runtime"),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            for ln in proc.stdout:
+                if ln.strip():
+                    self.append_log(f"  [vpngate] {ln.strip()}")
+            rc = proc.wait()
+            if rc == 0:
+                self.update_status_banner("✅ Worker 检测完成，八分组数据已更新！", is_error=False)
+                self.after(0, self.refresh_table_data)
+            else:
+                self.update_status_banner(f"❌ Worker 检测异常退出 (rc={rc})，请查看底部诊断日志", is_error=True)
+
+        threading.Thread(target=_check_task, daemon=True).start()
+
+    def on_gen_mihomo(self):
+        """调用 gen_client_config.py 生成 A 端 Mihomo 四场景 select 分流配置"""
+        script_path = os.path.join(FRONTEND_PATH, "gen_client_config.py")
+        if not os.path.exists(script_path):
+            self.append_log("[告警] 未找到 gen_client_config.py")
+            return
+        try:
+            subprocess.run([sys.executable, script_path], cwd=FRONTEND_PATH, check=True)
+            self.append_log("[A端配置] 已成功生成 Mihomo 四场景 select 组配置文件（严禁 URL-Test 防漂移已生效）。")
+            messagebox.showinfo("生成成功", "A端 Mihomo/Clash 四场景配置文件已生成！")
+        except Exception as e:
+            self.append_log(f"[A端配置生成失败] {e}")
+
+    def on_tree_right_click(self, event):
+        iid = self.tree.identify_row(event.y)
+        if iid:
+            self.tree.selection_set(iid)
+            self.ctx_menu.post(event.x_root, event.y_root)
+
+    def _append_host_file(self, filename: str, host: str):
+        target = os.path.join(FRONTEND_PATH, filename)
+        with open(target, "a", encoding="utf-8") as f:
+            f.write(f"\n{host}\n")
+        self.append_log(f"[名单更新] 已将 {host} 写入 {filename}")
+
+    def on_pin_selected(self):
+        sel = self.tree.selection()
+        if sel:
+            host = self.tree.item(sel[0], "values")[0]
+            self._append_host_file("pin.txt", host)
+
+    def on_ban_selected(self):
+        sel = self.tree.selection()
+        if sel:
+            host = self.tree.item(sel[0], "values")[0]
+            self._append_host_file("ban.txt", host)
+
+    def on_open_settings(self):
+        win = tk.Toplevel(self)
+        win.title("参数与凭证设置（防坑1自动校验）")
+        win.geometry("560x280")
+        win.transient(self)
+        win.grab_set()
+
+        ttk.Label(win, text="WORKER_CHECK_URL (含 ?sstp=vpn:vpn@):").pack(anchor="w", padx=16, pady=(14, 2))
+        url_var = tk.StringVar(value=self.cfg.get("WORKER_CHECK_URL", ""))
+        ttk.Entry(win, textvariable=url_var, width=68).pack(padx=16, pady=2)
+
+        ttk.Label(win, text="SSTP_USER / SSTP_PASS (默认 vpn / vpn):").pack(anchor="w", padx=16, pady=(10, 2))
+        cred_frame = ttk.Frame(win)
+        cred_frame.pack(anchor="w", padx=16)
+        u_var = tk.StringVar(value=self.cfg.get("SSTP_USER", "vpn"))
+        p_var = tk.StringVar(value=self.cfg.get("SSTP_PASS", "vpn"))
+        ttk.Entry(cred_frame, textvariable=u_var, width=20).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Entry(cred_frame, textvariable=p_var, width=20).pack(side=tk.LEFT)
+
+        def _save():
+            self.cfg["WORKER_CHECK_URL"] = url_var.get().strip()
+            self.cfg["SSTP_USER"] = u_var.get().strip() or "vpn"
+            self.cfg["SSTP_PASS"] = p_var.get().strip() or "vpn"
+            ok, msg = LocalConfigManager.save(self.cfg)
+            if ok:
+                self.append_log(f"[设置保存] {msg} | 当前 Worker: {mask_worker_url(self.cfg['WORKER_CHECK_URL'])}")
+                win.destroy()
+
+        ttk.Button(win, text="💾 保存并执行防坑校验", command=_save).pack(pady=20)
+
+
+if __name__ == "__main__":
+    app = VPNClientApp()
+    app.mainloop()
+
+```
+
+---
+
+### 3. 自动化测试与一键打包 EXE 脚本（`build_exe.py`）
+
+严格遵循**工作规则 1（任何代码改动必须过离线测试/语法校验，不允许“看起来对”就交付）**，此脚本会先跑全套语法校验与防坑单元测试，全部全绿通过后，再调用 `PyInstaller` 打包并注入 `--uac-admin`（双击 `.exe` 自动弹出管理员权限请求，保证 OpenVPN 正常创建虚拟网卡路由）。
+
+```python
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+一键离线测试 + PyInstaller 打包 EXE 脚本
+严格执行规则1：未通过语法与离线单元测试，拒绝打包交付！
+"""
+
+import os
+import py_compile
+import subprocess
+import sys
+
+ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+FRONTEND_DIR = os.path.join(ROOT_DIR, "frontend")
+
+
+def step1_syntax_and_unit_tests():
+    print("========== [Step 1] 执行离线语法校验与防坑自检 (规则1) ==========")
+    py_files = ["vpngate.py", "vpn_dial.py", "gen_client_config.py", "core_service.py", "app_gui.py"]
+    for fname in py_files:
+        fpath = os.path.join(FRONTEND_DIR, fname)
+        if not os.path.exists(fpath):
+            print(f"  [跳过] {fname} (尚未放入 frontend/)")
+            continue
+        try:
+            py_compile.compile(fpath, doraise=True)
+            print(f"  ✅ 语法校验通过: {fname}")
+        except py_compile.PyCompileError as e:
+            print(f"  ❌ 语法错误: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    # 运行现有的 test_*.py 单元测试
+    for fn in os.listdir(FRONTEND_DIR):
+        if fn.startswith("test_") and fn.endswith(".py"):
+            tpath = os.path.join(FRONTEND_DIR, fn)
+            print(f"  ▶ 运行离线测试: {fn} ...")
+            rc = subprocess.call([sys.executable, tpath], cwd=FRONTEND_DIR)
+            if rc != 0:
+                print(f"  ❌ 单元测试未通过: {fn} (rc={rc})，终止打包！", file=sys.stderr)
+                sys.exit(1)
+            print(f"  ✅ 单元测试全绿: {fn}")
+
+
+def step2_build_exe():
+    print("\n========== [Step 2] 调用 PyInstaller 封装 Windows EXE ==========")
+    entry_script = os.path.join(FRONTEND_DIR, "app_gui.py")
+    cmd = [
+        sys.executable,
+        "-m",
+        "PyInstaller",
+        "--noconfirm",
+        "--clean",
+        "--windowed",                 # 隐藏控制台黑框，纯 GUI 运行
+        "--uac-admin",                # 关键：自动请求 Windows 管理员权限（OpenVPN 路由/TAP 必需）
+        "--name=GateVPN_Client",      # 生成 GateVPN_Client.exe
+        f"--add-data={FRONTEND_DIR}{os.pathsep}frontend",
+        entry_script,
+    ]
+    print("执行打包命令:", " ".join(cmd))
+    rc = subprocess.call(cmd, cwd=ROOT_DIR)
+    if rc != 0:
+        print("❌ PyInstaller 打包失败，请检查是否已安装 pyinstaller (pip install pyinstaller)", file=sys.stderr)
+        sys.exit(1)
+
+    dist_exe = os.path.join(ROOT_DIR, "dist", "GateVPN_Client", "GateVPN_Client.exe")
+    print("\n============================================================")
+    print(f"🎉 打包成功！本地可执行文件位置:\n   {dist_exe}")
+    print("============================================================")
+
+
+if __name__ == "__main__":
+    step1_syntax_and_unit_tests()
+    step2_build_exe()
+
+```
+
+---
+
+## 四、 具体操作步骤（从零到双击运行 `.exe`）
+
+请按以下 6 个步骤依次操作，即可完成本地 `.exe` 客户端的构建与验证：
+
+### 第 1 步：整理单一源码目录（防坑 4 & 防坑 5/6）
+
+1. 在磁盘非中文路径下创建工作目录（如 `D:\gate-system\`），如果仍放在中文路径下，请避免在 PowerShell 中用 `-like` 通配符查找，直接用绝对路径切换目录：
+
+
+```powershell
+Set-Location -LiteralPath "D:\gate-system"
+
+```
+
+
+2. 将你现有的 `vpngate.py`、`vpn_dial.py`、`gen_client_config.py`、`ban.txt`、`pin.txt`、`test_*.py` 统一放进 `frontend/` 目录下，删除其他多余的副本目录（如旧的 `gate` 副本），确保全局只有一份源码。
+
+
+3. 将上方提供的 `core_service.py` 和 `app_gui.py` 保存到 `frontend/` 目录，将 `build_exe.py` 保存到 `D:\gate-system\` 根目录。
+
+### 第 2 步：安装打包工具与准备 OpenVPN 内核
+
+1. 在终端中安装依赖与 `PyInstaller`：
+```powershell
+pip install requests pyinstaller
+
+```
+
+
+2. 确保本机已安装 [OpenVPN Community](https://openvpn.net/community-downloads/)（会自动识别 `C:\Program Files\OpenVPN\bin\openvpn.exe`）；或者将 OpenVPN 便携版文件复制到 `D:\gate-system\bin\openvpn\` 目录下，软件会自动优先调用内嵌内核。
+
+
+
+### 第 3 步：配置 `.gitignore`（遵守工作规则 5：运行产物绝不入库）
+
+在 `D:\gate-system\.gitignore` 中写入以下规则，防止将私有配置、运行缓存或打包生成的二进制文件上传到 GitHub：
+
+```gitignore
+# 运行期产物与缓存（规则5）
+runtime/
+ovpn_out/
+cache/
+web/data.json
+web/nodes*.txt
+web/subscription*.txt
+*.ovpn
+vpngate_creds.txt
+feed.csv
+
+# PyInstaller 打包产物
+build/
+dist/
+*.spec
+__pycache__/
+
+```
+
+### 第 4 步：执行离线测试与一键生成 `.exe`（遵守工作规则 1）
+
+在终端运行打包脚本：
+
+```powershell
+python build_exe.py
+
+```
+
+* 脚本会首先执行 `Step 1`：对 `vpngate.py`、`vpn_dial.py`、`core_service.py`、`app_gui.py` 进行语法编译检查，并自动执行 `frontend/test_*.py`。
+
+
+* 测试全绿后，自动进入 `Step 2`：生成 `dist\GateVPN_Client\GateVPN_Client.exe`（已内嵌管理员 UAC 提权清单）。
+
+
+
+### 第 5 步：首次启动 `.exe` 与防坑配置验证
+
+1. 双击运行 `dist\GateVPN_Client\GateVPN_Client.exe`（会自动弹出 Windows 管理员授权提示，点击“是”）。
+
+
+2. **配置 Worker 地址（防坑 1 验证）**：
+* 点击界面右上角 **【🛠️ 参数与凭证设置】**。
+* 填入你的 `WORKER_CHECK_URL`，格式为：`https://<你的checker>.workers.dev/check?sstp=vpn:vpn@`。
+
+
+* 即使你不小心漏写了 `vpn:vpn@`，`LocalConfigManager` 也会在保存时自动帮你补齐 `?sstp=vpn:vpn@`，彻底杜绝 `SSTP server requires PAP authentication` 导致的 81/81 全败。
+
+
+
+
+3. **导入本地 `feed.csv`（打通 B 端零网络依赖）**：
+* 点击 **【📂 导入本地 feed.csv】**，选择你预先下载好的 `feed.csv` 文件（会自动复制到 `runtime/feed.csv`）。
+
+
+* 如果网络通畅，也可以直接点 **【🌐 在线刷新 Feed】** 或 **【🔍 调 Worker 实测节点】** 生成最新八分组数据。
+
+
+
+
+
+### 第 6 步：日常使用与双端拨号
+
+* **查看八分组与风控状态**：在界面中部的 8 个分组按钮（日常组 / 客服组 / 游戏组 / 下载组 / AI组 / 机房组 / 养鱼组 / 观察组）之间点击切换，表格会清晰展示每个节点的实测延迟、抖动、在线时长、以及 `✅ 纯净` / `⚠️ 脏IP(禁入)` 标签。
+
+
+* **B 端系统级一键拨号**：下拉框选择 `support`（客服稳连）或 `game`（游戏低延），点击 **【🚀 B端一键拨号 (OpenVPN)】**。底部诊断台会实时滚动 OpenVPN 握手日志，出现 `Initialization Sequence Completed` 时顶部状态栏变绿提示已稳连；若中途掉线，控制器会在 2 秒后自动切换下一个候选节点。
+
+
+* **A 端规则分流生成**：点击 **【⚙️ A端生成 Mihomo 配置】**，一键产出严格采用 `select` 组（防 IP 漂移掉线）且完全兼容 ECH 的分流配置文件。
