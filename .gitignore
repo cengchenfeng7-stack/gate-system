@@ -37,3 +37,5 @@ workers/*/worker.js.bak
 # ---- 系统 ----
 Thumbs.db
 desktop.ini
+.ignore_tmp/vpn_dial新版.py
+.ignore_tmp/vpn_dial新版.py
