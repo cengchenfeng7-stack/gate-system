@@ -1,1 +1,21 @@
-{"name":"agent-squad-app","version":"1.0.0","type":"module","private":true}
+{
+  "name": "agent-squad-app",
+  "version": "2.9.0",
+  "description": "智能 Agent 群 · 模块化服务端",
+  "type": "module",
+  "private": true,
+  "main": "server.mjs",
+  "scripts": {
+    "start": "node server.mjs",
+    "dev": "node --watch server.mjs",
+    "check": "node --check server.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "better-sqlite3": "^13.0.3",
+    "express": "^4.21.2",
+    "uuid": "^11.1.0"
+  }
+}

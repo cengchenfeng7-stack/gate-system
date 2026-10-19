@@ -1,0 +1,15 @@
+refactor: modular restructure (v2.9-modular)
+
+- Split server.mjs (7552 lines) into modular architecture
+- Added config/ (constants, feature-flags, realms)
+- Added middleware/ (auth, validation, error, oracle-filter, resource-guard)
+- Added routes/ (sessions, chat, memory, autonomy, pantheon, tools, admin, desktop)
+- Added handlers/ directory structure
+- server.mjs simplified to ~300 lines modular entry
+- Added feature-flags for feature toggles
+- Added realms config for 10 realms permission matrix
+- Added oracle-filter middleware for truth protocol
+- Added resource-guard for resource quotas
+- Added feature-flags for feature toggles
+
+Next: add package.json deps + complete server.mjs missing functions
