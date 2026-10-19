@@ -1,0 +1,157 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --font-sans: 'Inter', system-ui, sans-serif;
+    --font-mono: 'JetBrains Mono', monospace;
+  }
+
+  * {
+    @apply border-temple-border;
+  }
+
+  html {
+    @apply scroll-smooth;
+  }
+
+  body {
+    @apply bg-temple-bg text-temple-text font-sans antialiased;
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+  }
+
+  ::selection {
+    @apply bg-temple-primary/30 text-temple-text;
+  }
+
+  /* 滚动条样式 */
+  ::-webkit-scrollbar {
+    @apply w-2 h-2;
+  }
+  ::-webkit-scrollbar-track {
+    @apply bg-transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply bg-temple-border rounded-full hover:bg-temple-textMuted/50;
+  }
+  ::-webkit-scrollbar-corner {
+    @apply bg-transparent;
+  }
+
+  /* 焦点可见性 */
+  :focus-visible {
+    @apply outline-none ring-2 ring-temple-primary ring-offset-2 ring-offset-temple-bg;
+  }
+}
+
+@layer components {
+  /* 按钮基础 */
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg font-medium transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-temple-primary focus-visible:ring-offset-2 focus-visible:ring-offset-temple-bg disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+  .btn-primary {
+    @apply btn bg-temple-primary text-white hover:bg-temple-primaryHover active:bg-temple-primary/90;
+  }
+  .btn-secondary {
+    @apply btn bg-temple-surface text-temple-text border border-temple-border hover:bg-temple-border active:bg-temple-border/80;
+  }
+  .btn-danger {
+    @apply btn bg-temple-danger text-white hover:bg-red-600 active:bg-red-700;
+  }
+  .btn-ghost {
+    @apply btn bg-transparent hover:bg-temple-border active:bg-temple-border/80;
+  }
+  .btn-sm {
+    @apply px-3 py-1.5 text-sm gap-1.5;
+  }
+  .btn-lg {
+    @apply px-6 py-3 text-base gap-2;
+  }
+
+  /* 输入框基础 */
+  .input {
+    @apply w-full px-3 py-2 bg-temple-surface border border-temple-border rounded-lg text-temple-text placeholder-temple-textMuted/60 transition-all duration-200 focus:border-temple-primary focus:ring-2 focus:ring-temple-primary/20 focus:outline-none;
+  }
+  .input-sm {
+    @apply px-2.5 py-1.5 text-sm;
+  }
+
+  /* 卡片基础 */
+  .card {
+    @apply bg-temple-surface border border-temple-border rounded-xl;
+  }
+  .card-hover {
+    @apply card hover:border-temple-primary/50 transition-colors duration-200;
+  }
+
+  /* 标签页基础 */
+  .tab {
+    @apply px-4 py-2 rounded-lg font-medium text-temple-textMuted hover:text-temple-text hover:bg-temple-border transition-all duration-200;
+  }
+  .tab-active {
+    @apply text-temple-primary bg-temple-primary/10;
+  }
+
+  /* 徽标 */
+  .badge {
+    @apply inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium;
+  }
+  .badge-primary { @apply bg-temple-primary/20 text-temple-primary; }
+  .badge-success { @apply bg-temple-success/20 text-temple-success; }
+  .badge-warning { @apply bg-temple-warning/20 text-temple-warning; }
+  .badge-danger { @apply bg-temple-danger/20 text-temple-danger; }
+  .badge-neutral { @apply bg-temple-border text-temple-textMuted; }
+
+  /* 滚动区域 */
+  .scroll-area {
+    @apply overflow-y-auto scrollbar-thin scrollbar-track-transparent scrollbar-thumb-temple-border;
+  }
+
+  /* 动画 */
+  .animate-fade-in {
+    animation: fadeIn 0.2s ease-out;
+  }
+  .animate-slide-up {
+    animation: slideUp 0.3s ease-out;
+  }
+  .animate-scale-in {
+    animation: scaleIn 0.2s ease-out;
+  }
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+  .glass {
+    @apply bg-temple-surface/80 backdrop-blur-sm border border-temple-border/50;
+  }
+  .glass-strong {
+    @apply bg-temple-surface/95 backdrop-blur-md border border-temple-border/30;
+  }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes scaleIn {
+  from { opacity: 0; transform: scale(0.95); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+/* 第三方库覆盖 */
+.react-flow__node-default {
+  @apply bg-temple-surface border-temple-border rounded-lg shadow-lg;
+}
+.react-flow__handle {
+  @apply bg-temple-primary border-temple-bg;
+}
+.react-flow__edge-path {
+  @apply stroke-temple-border;
+}

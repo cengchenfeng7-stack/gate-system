@@ -1,0 +1,419 @@
+{
+  "openai": {
+    "name": "OpenAI",
+    "baseUrl": "https://api.openai.com/v1",
+    "defaultModel": "gpt-4o",
+    "apiKeyEnv": "OPENAI_API_KEY",
+    "models": [
+      "gpt-4o",
+      "gpt-4o-mini",
+      "o1",
+      "o3-mini"
+    ]
+  },
+  "anthropic": {
+    "name": "Anthropic Claude",
+    "baseUrl": "https://api.anthropic.com",
+    "defaultModel": "claude-3-7-sonnet-20250219",
+    "apiKeyEnv": "ANTHROPIC_API_KEY",
+    "models": [
+      "claude-3-7-sonnet-20250219",
+      "claude-3-5-sonnet-20241022",
+      "claude-3-5-haiku-20241022"
+    ]
+  },
+  "deepseek": {
+    "name": "DeepSeek",
+    "baseUrl": "https://api.deepseek.com/v1",
+    "defaultModel": "deepseek-chat",
+    "apiKeyEnv": "DEEPSEEK_API_KEY",
+    "models": [
+      "deepseek-chat",
+      "deepseek-reasoner"
+    ]
+  },
+  "kimi-coding": {
+    "name": "Kimi Coding (Moonshot)",
+    "baseUrl": "https://api.moonshot.cn/v1",
+    "defaultModel": "kimi-k1.5",
+    "apiKeyEnv": "KIMI_API_KEY",
+    "models": [
+      "kimi-k1.5",
+      "moonshot-v1-8k",
+      "moonshot-v1-32k"
+    ]
+  },
+  "openrouter": {
+    "name": "OpenRouter",
+    "baseUrl": "https://openrouter.ai/api/v1",
+    "defaultModel": "anthropic/claude-3.7-sonnet",
+    "apiKeyEnv": "OPENROUTER_API_KEY",
+    "models": [
+      "anthropic/claude-3.7-sonnet",
+      "openai/gpt-4o",
+      "deepseek/deepseek-chat"
+    ]
+  },
+  "groq": {
+    "name": "Groq",
+    "baseUrl": "https://api.groq.com/openai/v1",
+    "defaultModel": "llama-3.3-70b-versatile",
+    "apiKeyEnv": "GROQ_API_KEY",
+    "models": [
+      "llama-3.3-70b-versatile",
+      "llama-3.1-8b-instant"
+    ]
+  },
+  "google": {
+    "name": "Google Gemini",
+    "baseUrl": "https://generativelanguage.googleapis.com/v1beta/openai/",
+    "defaultModel": "gemini-2.5-pro",
+    "apiKeyEnv": "GEMINI_API_KEY",
+    "models": [
+      "gemini-2.5-pro",
+      "gemini-2.5-flash"
+    ]
+  },
+  "mistral": {
+    "name": "Mistral AI",
+    "baseUrl": "https://api.mistral.ai/v1",
+    "defaultModel": "mistral-large-latest",
+    "apiKeyEnv": "MISTRAL_API_KEY",
+    "models": [
+      "mistral-large-latest",
+      "codestral-latest"
+    ]
+  },
+  "together": {
+    "name": "Together AI",
+    "baseUrl": "https://api.together.xyz/v1",
+    "defaultModel": "meta-llama/Llama-3.3-70b-Instruct-Turbo",
+    "apiKeyEnv": "TOGETHER_API_KEY",
+    "models": [
+      "meta-llama/Llama-3.3-70b-Instruct-Turbo"
+    ]
+  },
+  "fireworks": {
+    "name": "Fireworks AI",
+    "baseUrl": "https://api.fireworks.ai/inference/v1",
+    "defaultModel": "accounts/fireworks/models/llama-v3-70b-instruct",
+    "apiKeyEnv": "FIREWORKS_API_KEY",
+    "models": [
+      "accounts/fireworks/models/llama-v3-70b-instruct"
+    ]
+  },
+  "xai": {
+    "name": "xAI (Grok)",
+    "baseUrl": "https://api.x.ai/v1",
+    "defaultModel": "grok-2",
+    "apiKeyEnv": "XAI_API_KEY",
+    "models": [
+      "grok-2",
+      "grok-2-mini"
+    ]
+  },
+  "nvidia": {
+    "name": "NVIDIA NIM",
+    "baseUrl": "https://integrate.api.nvidia.com/v1",
+    "defaultModel": "meta/llama-3.3-70b-instruct",
+    "apiKeyEnv": "NVIDIA_API_KEY",
+    "models": [
+      "meta/llama-3.3-70b-instruct"
+    ]
+  },
+  "cerebras": {
+    "name": "Cerebras",
+    "baseUrl": "https://api.cerebras.ai/v1",
+    "defaultModel": "llama3.1-70b",
+    "apiKeyEnv": "CEREBRAS_API_KEY",
+    "models": [
+      "llama3.1-70b",
+      "llama3.1-8b"
+    ]
+  },
+  "cloudflare-ai-gateway": {
+    "name": "Cloudflare AI Gateway",
+    "baseUrl": "https://gateway.ai.cloudflare.com/v1",
+    "defaultModel": "@cf/meta/llama-3-8b-instruct",
+    "apiKeyEnv": "CLOUDFLARE_API_KEY",
+    "models": [
+      "@cf/meta/llama-3-8b-instruct"
+    ]
+  },
+  "amazon-bedrock": {
+    "name": "Amazon Bedrock (OpenAI Compatible)",
+    "baseUrl": "https://bedrock-runtime.us-east-1.amazonaws.com/v1",
+    "defaultModel": "anthropic.claude-3-7-sonnet",
+    "apiKeyEnv": "BEDROCK_API_KEY",
+    "models": [
+      "anthropic.claude-3-7-sonnet"
+    ]
+  },
+  "azure-openai-responses": {
+    "name": "Azure OpenAI",
+    "baseUrl": "https://YOUR_RESOURCE_NAME.openai.azure.com/openai/v1",
+    "defaultModel": "gpt-4o",
+    "apiKeyEnv": "AZURE_OPENAI_API_KEY",
+    "models": [
+      "gpt-4o"
+    ]
+  },
+  "baseten": {
+    "name": "Baseten",
+    "baseUrl": "https://model-api.baseten.co/v1",
+    "defaultModel": "default",
+    "apiKeyEnv": "BASETEN_API_KEY",
+    "models": [
+      "default"
+    ]
+  },
+  "cloudflare-workers-ai": {
+    "name": "Cloudflare Workers AI",
+    "baseUrl": "https://api.cloudflare.com/client/v4/accounts/ACCOUNT_ID/ai/v1",
+    "defaultModel": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+    "apiKeyEnv": "CF_API_KEY",
+    "models": [
+      "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+    ]
+  },
+  "github-copilot": {
+    "name": "GitHub Copilot",
+    "baseUrl": "https://api.githubcopilot.com/v1",
+    "defaultModel": "gpt-4o",
+    "apiKeyEnv": "GITHUB_TOKEN",
+    "models": [
+      "gpt-4o",
+      "claude-3.5-sonnet"
+    ]
+  },
+  "google-vertex": {
+    "name": "Google Vertex AI",
+    "baseUrl": "https://us-central1-aiplatform.googleapis.com/v1",
+    "defaultModel": "gemini-1.5-pro",
+    "apiKeyEnv": "VERTEX_API_KEY",
+    "models": [
+      "gemini-1.5-pro"
+    ]
+  },
+  "huggingface": {
+    "name": "Hugging Face Inference",
+    "baseUrl": "https://api-inference.huggingface.co/v1",
+    "defaultModel": "mistralai/Mistral-7B-Instruct-v0.3",
+    "apiKeyEnv": "HF_API_KEY",
+    "models": [
+      "mistralai/Mistral-7B-Instruct-v0.3"
+    ]
+  },
+  "meta": {
+    "name": "Meta Llama API",
+    "baseUrl": "https://api.meta.com/v1",
+    "defaultModel": "llama-3-70b",
+    "apiKeyEnv": "META_API_KEY",
+    "models": [
+      "llama-3-70b"
+    ]
+  },
+  "minimax": {
+    "name": "MiniMax",
+    "baseUrl": "https://api.minimax.chat/v1",
+    "defaultModel": "abab6.5s-chat",
+    "apiKeyEnv": "MINIMAX_API_KEY",
+    "models": [
+      "abab6.5s-chat"
+    ]
+  },
+  "minimax-cn": {
+    "name": "MiniMax CN",
+    "baseUrl": "https://api.minimax.icu/v1",
+    "defaultModel": "abab6.5s-chat",
+    "apiKeyEnv": "MINIMAX_CN_API_KEY",
+    "models": [
+      "abab6.5s-chat"
+    ]
+  },
+  "moonshotai": {
+    "name": "Moonshot AI",
+    "baseUrl": "https://api.moonshot.ai/v1",
+    "defaultModel": "moonshot-v1-8k",
+    "apiKeyEnv": "MOONSHOT_API_KEY",
+    "models": [
+      "moonshot-v1-8k"
+    ]
+  },
+  "moonshotai-cn": {
+    "name": "Moonshot AI CN",
+    "baseUrl": "https://api.moonshot.cn/v1",
+    "defaultModel": "moonshot-v1-8k",
+    "apiKeyEnv": "MOONSHOT_CN_API_KEY",
+    "models": [
+      "moonshot-v1-8k"
+    ]
+  },
+  "openai-codex": {
+    "name": "OpenAI Codex",
+    "baseUrl": "https://api.openai.com/v1",
+    "defaultModel": "code-davinci-002",
+    "apiKeyEnv": "OPENAI_API_KEY",
+    "models": [
+      "code-davinci-002"
+    ]
+  },
+  "opencode": {
+    "name": "OpenCode",
+    "baseUrl": "https://api.opencode.ai/v1",
+    "defaultModel": "opencode-coder-v1",
+    "apiKeyEnv": "OPENCODE_API_KEY",
+    "models": [
+      "opencode-coder-v1"
+    ]
+  },
+  "opencode-go": {
+    "name": "OpenCode Go",
+    "baseUrl": "https://go.opencode.ai/v1",
+    "defaultModel": "opencode-go-v1",
+    "apiKeyEnv": "OPENCODE_GO_API_KEY",
+    "models": [
+      "opencode-go-v1"
+    ]
+  },
+  "qwen-token-plan": {
+    "name": "Qwen Token Plan",
+    "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "defaultModel": "qwen-max",
+    "apiKeyEnv": "DASHSCOPE_API_KEY",
+    "models": [
+      "qwen-max",
+      "qwen-plus"
+    ]
+  },
+  "qwen-token-plan-cn": {
+    "name": "Qwen Token Plan CN",
+    "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "defaultModel": "qwen-max",
+    "apiKeyEnv": "DASHSCOPE_API_KEY",
+    "models": [
+      "qwen-max",
+      "qwen-plus"
+    ]
+  },
+  "qwen-token-plan-individual": {
+    "name": "Qwen Token Individual",
+    "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "defaultModel": "qwen-turbo",
+    "apiKeyEnv": "DASHSCOPE_API_KEY",
+    "models": [
+      "qwen-turbo"
+    ]
+  },
+  "radius": {
+    "name": "Radius",
+    "baseUrl": "https://api.radius.ai/v1",
+    "defaultModel": "radius-v1",
+    "apiKeyEnv": "RADIUS_API_KEY",
+    "models": [
+      "radius-v1"
+    ]
+  },
+  "vercel-ai-gateway": {
+    "name": "Vercel AI Gateway",
+    "baseUrl": "https://gateway.vercel.dev/v1",
+    "defaultModel": "openai/gpt-4o",
+    "apiKeyEnv": "VERCEL_API_KEY",
+    "models": [
+      "openai/gpt-4o"
+    ]
+  },
+  "xiaomi": {
+    "name": "Xiaomi MiGPT",
+    "baseUrl": "https://api.mi.com/v1",
+    "defaultModel": "migpt-v1",
+    "apiKeyEnv": "XIAOMI_API_KEY",
+    "models": [
+      "migpt-v1"
+    ]
+  },
+  "xiaomi-token-plan-ams": {
+    "name": "Xiaomi Token AMS",
+    "baseUrl": "https://api-ams.mi.com/v1",
+    "defaultModel": "migpt-v1",
+    "apiKeyEnv": "XIAOMI_AMS_API_KEY",
+    "models": [
+      "migpt-v1"
+    ]
+  },
+  "xiaomi-token-plan-cn": {
+    "name": "Xiaomi Token CN",
+    "baseUrl": "https://api-cn.mi.com/v1",
+    "defaultModel": "migpt-v1",
+    "apiKeyEnv": "XIAOMI_CN_API_KEY",
+    "models": [
+      "migpt-v1"
+    ]
+  },
+  "xiaomi-token-plan-sgp": {
+    "name": "Xiaomi Token SGP",
+    "baseUrl": "https://api-sgp.mi.com/v1",
+    "defaultModel": "migpt-v1",
+    "apiKeyEnv": "XIAOMI_SGP_API_KEY",
+    "models": [
+      "migpt-v1"
+    ]
+  },
+  "zai": {
+    "name": "ZAI (Zhipu)",
+    "baseUrl": "https://open.bigmodel.cn/api/paas/v4",
+    "defaultModel": "glm-4",
+    "apiKeyEnv": "ZAI_API_KEY",
+    "models": [
+      "glm-4",
+      "glm-4-flash"
+    ]
+  },
+  "zai-coding-cn": {
+    "name": "ZAI Coding CN",
+    "baseUrl": "https://open.bigmodel.cn/api/paas/v4",
+    "defaultModel": "glm-4",
+    "apiKeyEnv": "ZAI_API_KEY",
+    "models": [
+      "glm-4",
+      "glm-4-flash"
+    ]
+  },
+  "siliconflow": {
+    "name": "硅基流动 SiliconFlow",
+    "baseUrl": "https://api.siliconflow.cn/v1",
+    "defaultModel": "deepseek-ai/DeepSeek-V3",
+    "apiKeyEnv": "SILICONFLOW_API_KEY",
+    "models": [
+      "deepseek-ai/DeepSeek-V3",
+      "Qwen/Qwen2.5-72B-Instruct"
+    ]
+  },
+  "sensenova": {
+    "name": "商汤 SenseNova",
+    "baseUrl": "https://api.sensenova.cn/compatible-mode/v1",
+    "defaultModel": "SenseChat-5",
+    "apiKeyEnv": "SENSENOVA_API_KEY",
+    "models": [
+      "SenseChat-5",
+      "SenseChat-5-Cantonese"
+    ]
+  },
+  "tencent-tokenhub": {
+    "name": "腾讯云 TokenHub",
+    "baseUrl": "https://api.lkeap.cloud.tencent.com/v1",
+    "defaultModel": "deepseek-v3",
+    "apiKeyEnv": "TENCENT_API_KEY",
+    "models": [
+      "deepseek-v3",
+      "deepseek-r1"
+    ]
+  },
+  "agnes": {
+    "name": "Agnes AI",
+    "baseUrl": "",
+    "defaultModel": "",
+    "apiKeyEnv": "AGNES_API_KEY",
+    "models": []
+  }
+}

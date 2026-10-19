@@ -1,0 +1,357 @@
+AI 神殿 · 项目综合诊断与战略建议书
+版本：v2.9 基线（2026-10-19）
+分析依据：6 份核心文档 + server.mjs/index.html/tools.mjs/providers.mjs 等关键代码实测核对
+定位：取代现有碎片化文档，成为唯一权威的决策参考
+
+目录
+核心结论
+项目现状：客观事实盘点
+转型成效：从"群聊工具"到"本地 AI 工作台"的质变
+P0 致命缺陷（必须在对外分发前修复）
+P1 严重缺陷（严重影响可用性与可信度）
+P2 结构性债务（阻碍长期维护）
+市场缺口对标：别人有、我没有
+三大独家护城河（核心资产，值得深耕）
+后续路线图：分阶段可执行计划
+verify-all.mjs
+附录：关键文件索引与版本演进
+一、核心结论
+一句话：你用 6 天、约 2.4 万行代码，建成了一个功能广度对标商业产品的本地 AI 工作台，但它的"地基"是空的：没有版本控制、没有测试、没有依赖声明，且在当前生产配置下存在一条 "零门槛访问 → 读取全部密钥 → 无确认执行任意系统命令" 的完整攻击链。
+
+最尖锐的讽刺：文档里标记为"✅ 已闭环、实测通过"的三个核心能力——多轮对话记忆、知识库语义检索、自主代理学习评分——在代码里分别是"根本没接线""只有关键词匹配""只看工具名不看结果"。
+
+当前主要矛盾不是"缺功能"，而是"已写的功能没有兑现"。继续加功能只会让债务滚雪球。必须先还债，再补齐，最后放大差异化。
+
+二、项目现状：客观事实盘点
+2.1 代码体量
+文件	行数	大小	性质
+app/server.mjs	7552	309 KB	单文件：路由+业务+存储+模型编排+SSE+后台任务
+app/dist/index.html	7658	339 KB	单文件：CSS + 4767 行内联 JS
+app/dist/admin.html	3345	142 KB	单文件
+Launcher.cs	1398	58 KB	桌面壳（C# 编译）
+app/engine/*.mjs（13 个）	~4900	160 KB	已拆分模块
+合计	~24,000		
+2.2 工程基线（全部为 0 或缺失）
+项目	状态	证据
+版本控制	❌ 无 git	无 .git/，无 .gitignore
+自动化测试	❌ 0 个测试	无 *test*/*spec*；verify-all.mjs 只做 typeof 存在性检查
+依赖声明	❌ app/package.json 依赖数为 0	实际 import express/better-sqlite3/@modelcontextprotocol/sdk/@tencent-ai/agent-sdk
+锁文件	❌ app/ 下无 package-lock.json	135 个包版本无从追溯
+构建/模块化	❌ 无	4767 行内联 JS，无 type="module"
+Lint / 类型检查	❌ 无	—
+CI/CD	❌ 无	—
+依赖不可复现的后果：better-sqlite3 是原生模块。换 Node 版本必须重编，但没有任何文档记录它的版本与编译参数。这个项目目前只能靠"拷贝 node_modules"这一种方式延续。
+
+2.3 真实使用数据（data/chat.db 实测，30 张表）
+表	行数	解读
+sessions	46	建了 46 个群
+messages	96	≈2 条/会话，几乎每个群都是空壳
+token_usage	54	主模型 DeepSeek-V3 占 49 次
+patrol_runs	45	后台巡检跑了 45 轮
+proactive_services	10	巡检 45 轮只产出 10 条建议
+strategy_library	0	文档标为"已闭环 ✅"的策略沉淀，零记录
+agent_goals	0	文档标为"已闭环 ✅"的长程目标，零记录
+autonomous_tasks	2	自主任务队列几乎没用过
+group_files / notifications	0	—
+结论：产品功能广度远超实际使用深度。46 个会话平均 2 条消息，说明群聊这个核心形态在真实使用中没有被建立起来。 这与 P0 缺陷"群聊零记忆"互为因果。
+
+2.4 当前生产配置（.env 实测）——最危险的组合
+.env:15  BIND_HOST=127.0.0.1                    ← 唯一屏障
+.env:18  ADMIN_AUTH=auto + ADMIN_PASSWORD=(空)
+.env     FAMILY_ACCESS_PASSWORD=(空)             → 153 个 API 零鉴权
+.env:68  CONFIG_PERMISSION_LEVEL=3               → tools.mjs:541「允许所有工具」，写操作零确认
+.env:69  AI_INTELLIGENCE_LEVEL=3                 → maxTurns=3
+.env:70  SANDBOX_MODE=0                          → 写入直接落真实磁盘
+.env     TERMINAL_ENABLED=1                      → 终端开启
+三、转型成效：从"群聊工具"到"本地 AI 工作台"的质变
+维度	转型前（v0.1 地基版）	转型后（v2.8 完整版）	质变说明
+产品定位	本地多 Agent 群聊工具	本地 AI 工作台 / 多智能体协作平台	从"聊天工具"进化为"生产力平台"
+主界面	单页聊天 + 固定成员卡片	助手库 + 多标签 + @引用 + 设置/用量/工具面板	现代化 IDE/Chat 客户端交互范式
+交互模式	仅群聊	9 种模式：群聊/私聊/工作流/主动服务/持续对话/创作/数据分析/自主代理/跨平台	覆盖协作、生产、自主执行全场景
+模型接入	单一配置	44 个提供商预设 + 任意自定义 Base URL + 六维能力标签	真·多模型、多协议、零配置接入
+自主性等级	L1 被动响应	L2 主动建议（巡检/画像/反馈学习）+ L3 自主执行（队列/重规划/策略/长程目标）	从"问答"到"自主干活"的跨越
+工具体系	少量内置工具	文件/命令/知识库/GUI/MCP/插件声明式工具，统一权限与开关	可编程、可扩展、可管控的工具生态
+可观测性	仅日志	审计日志、Token 用量、成本估算、缓存命中率、每日热力图	生产级可观测与成本管控
+产品化能力	无统一设置	设置中心、用量中心、工具页、更新日志、家庭访问、开放 API	具备交付级产品形态
+桌面集成	无	托盘常驻、开机自启、系统通知、全局快捷键、全局划词、托盘未读角标	原生桌面应用体验
+群聊管理	简陋	群资料/群号/独立成员/五项权限/置顶免打扰折叠/扩容/@成员/消息搜索/群文件/引用回复/公告/发言频率	企业级 IM 群管理能力
+数据安全	无备份、无沙箱	自动/手动备份恢复、文件级沙箱、路径护栏、危险命令黑名单、单口令家庭访问	生产环境可用的安全基线
+四、P0 致命缺陷（必须在任何对外分发之前修复）
+P0 = 存在即漏洞，不修复不可对外分发。
+
+4.1 完整攻击链：零门槛访问 → 密钥外泄 → 无确认执行任意系统命令
+五段证据全部闭合：
+
+环节	代码位置	说明
+① 零鉴权	server.mjs:3490-3495/3501/3544/3825	adminAuthRequired() 在 loopback 下退化为 next()；家庭口令为空时 return next()；153 个 API 全无鉴权
+② 明文密钥外泄	server.mjs:5667/5693/3846	/api/open/config 明文返回 key（已有 masked 却不用）；console.log 打印自动生成的 ADMIN_PASSWORD
+③ 可改写 API Key 与权限档位（提权）	providers-service.mjs:137-172/216-232 server.mjs:3830	/api/providers/config、/api/config-permission 无鉴权，且被显式豁免在家庭口令之外
+④ 路径护栏失效到项目根	server.mjs:2729	workspaceRoot = path.resolve(__dirname, "..") → 整个项目根，包含 .env；模型可直接 read_file(".env")
+⑤ 命令执行零防护	tools.mjs:429-433/657-662	黑名单仅 16 条 Linux 字面量，子串匹配，cmd /c 逃逸；PowerShell/编码/管道全不在表内
+组合结论：任何能访问 3000 端口的进程 → POST /api/config-permission 提权到档位 3 → POST /api/chat 注入提示词 → 模型调 read_file(".env") 取走密钥、调 execute_command 执行任意命令。全链路无一处需要用户确认。
+
+修复（按优先级）：
+
+providers-service.mjs:137/216 加 requireAdmin；server.mjs:3830 从豁免名单移除 /config-permission
+server.mjs:5667/5693 删除明文 key，只返回已有的 masked
+server.mjs:3846 停止打印密码
+server.mjs:3490-3495：/api/admin/* 与所有 .env 写入端点始终要求认证
+server.mjs:2729 改用 getWorkspaceRoot()；tools.mjs:446 增加 .env/data/logs/node_modules/runtime 拒绝名单
+.env:68 改 CONFIG_PERMISSION_LEVEL=2，.env:70 改 SANDBOX_MODE=1
+4.2 前端 SSE 解析器 UTF-8 乱码 + 丢 Token
+位置：index.html:3315-3332
+
+const decoder = new TextDecoder();        // 3315 缺 {stream: true}
+const chunk = decoder.decode(value);      // 3321
+const lines = chunk.split('\n');          // 3322 无 buffer 残留
+for (const line of lines) {
+  if (line.startsWith('data: ')) {
+    try { const data = JSON.parse(line.slice(6)); handleSSEEvent(data); }
+    catch (e) { /* 3329 静默吞掉 */ }     
+  }
+}
+两个独立缺陷：
+
+decode(value) 缺 {stream: true} → 每个落在多字节字符中间的 chunk 边界产出 U+FFFD。中文 3 字节/字，长回复几乎必然跨界 → 输出满屏 ``
+无 buffer 残留 → data: {...} 的 JSON 跨块被 split('\n') 切断 → JSON.parse 抛错 → 静默吞掉 → 丢 Token
+后端 providers.mjs:71-109 写法完全正确（{stream:true} + buffer = lines.pop()）。前端是全项目唯一没做对的地方 —— 而前端正是用户唯一看到的地方。
+
+4.3 群聊在直连提供商下是「零记忆」的
+位置：server.mjs:1609-1664
+
+const priorMessages = isOllamaProvider() ? getMessagesBySession(...)...slice(-10)... : "";
+                              ↑ 只有 Ollama 分支非空
+直连分支（SiliconFlow 当前激活）的 userPrompt 仅含当前 prompt，不含任何历史，history: []。
+
+直接解释了 §2.3 的数据现象：46 个会话只有 96 条消息 —— 用户和这个群聊聊不下去。
+
+4.4 消息输出零转义直入 innerHTML（6 类确认路径）
+污染源	位置	风险
+用户消息 + 引用 label 未转义	index.html:3264/3245	自 XSS
+data.toolName（模型自己选的工具名）	index.html:3434/3442→4005	提示词注入
+renderConfirmCard：input.path/command/content/old_string/new_string/data.toolName/data.message 全部零转义	index.html:3828-3839	最危险：模型生成的工具参数直入 DOM
+data.message/error/stageName/t.task_name	index.html:3492-3666 14 处	服务端透传
+showNotification 的 ${message}	index.html:7598-7601	错误消息
+admin.html:1916-1924 存储型 XSS	${msg.content.slice(0,200)} 直入 innerHTML	后台管理
+对照组证明这是遗漏而非设计：escapeHtml 在 7 处被正确使用；流式正文和历史渲染都用 textContent。
+
+4.5 无「停止生成」，且客户端断开后模型仍在跑并继续执行工具
+前端：全文件 AbortController / abort( → 0 命中。生成中反而禁止发消息/关标签，用户只能干等
+后端：4 处 signal = null 是默认值；7 个 runAgentTurnLoop 调用点无一传 signal；res.on('close') 只清心跳，不中断上游 fetch
+管道已铺好：providers.mjs:59/192/311 已把 signal 传给 fetch，只差接线
+五、P1 严重缺陷（严重影响可用性与可信度）
+#	问题	现状	影响
+1	无 Markdown/代码高亮/LaTeX	markdown|marked|hljs|katex → 0 命中；.message-content { white-space: pre-wrap; }	代码块原样纯文本，复制要手工去代码块外抠
+2	自主代理评分只看工具名，不看结果	scoreAutonomousStep 只数 write_file 次数；verified = toolNames.length > 0 含报错也算	写两个乱码文件 = 1.0 分；失败命令也算验证通过 → 策略库可被系统性刷满
+3	知识库无向量、无真 rerank，bm25 被丢弃	FTS5 仅作行过滤，最终排序用手写子串加权；embedding|vector|cosine 全域 0 命中	"保质期多久"搜不出"保质期 30 天"；model-capabilities 标了 embedding 却一次没用
+4	主动服务 3 分支 2 条不可达	learning/save_knowledge 恒 false（newKnowledge 从未赋值）；resume_task 需字面量"任务："	用户把群聊结果误认为"主动服务分析产物"
+5	add_knowledge 从未暴露给模型	TOOLS_OPENAI/TOOLS_CLAUDE 里无此工具，但自主任务 prompt 指示模型调用	一条不可执行的指令
+6	Claude Token 统计全是估算	未解析 message_start/message_delta 的 usage，字符/2 估算	中文成本低估 50%~100%，用量中心看板不可信
+7	对话管理基线缺失	无停止/编辑重跑/分支/多行输入/拖拽上传/历史命令	任何一项缺失都让用户觉得"这不是 2026 年的 AI 产品"
+六、P2 结构性债务（阻碍长期维护）
+问题	位置/证据
+无版本控制	无 git，曾发生 tools.mjs 撑到 13MB 事故无法回滚
+单文件超维护边界	server.mjs 7552 行：6 个模式运行器复制粘贴、3 套 SSE 实现、5 套 .env 写入实现、群聊/私聊 SDK 循环逐行重复
+已实现但从未接线的死代码	toolPairPreservingSlice/getTruncatedSummary 上下文压缩全项目零调用；monitorScreen 零调用；建议反馈权重算出来存库但 list()/matchForGoal 都不读
+无全局错误中间件	Express 4 参错误中间件 0 个；进程级 uncaughtException 捕获后继续运行；async 路由 rejection → 客户端挂死、日志无上下文
+权限档位由客户端决定	confirmed: permissionMode === "bypassPermissions" || allowWrites 直接取 req.body → 调用方自己声称即可关掉确认档
+其他：requireAdmin 注册顺序脆弱；familyLoginAttempts 永不过期清理；UIA ref 池无上限；~150 处 res.status(500).json({error: e?.message}) 泄露绝对路径；消息搜索 LIKE '%q%' 前置通配符无法走索引；前端流式分片全量 querySelectorAll 导致 O(n²)；4767 行内联 JS 零 a11y；symlink/junction 绕过路径护栏	
+七、市场缺口对标（对标：Open WebUI 136K★ / Dify 140K★ / AnythingLLM 59K★ / Cherry Studio / LibreChat / Jan / Msty）
+7.1 知识与 RAG（最大缺口）
+能力	市场标配	你的现状
+向量 / embedding 检索	几乎所有竞品	❌ 全域 0 命中
+混合检索（BM25 + 向量）	Open WebUI / AnythingLLM	❌ 纯 FTS5 + 手写子串加权
+Cross-encoder rerank	Open WebUI	❌ 注释说"重排"实为子串加权
+文档摄取（PDF/docx/pptx/网页/视频）	几乎所有竞品	❌ 只有手动录入 FAQ，无任何文件解析
+分块 / 重叠 / chunk 策略可配	AnythingLLM	❌ 无
+网页抓取 / 联网检索	Open WebUI / AnythingLLM / LibreChat	❌ 无 URL 解析入口（@ 菜单只有 3 类来源）
+这是与竞品差距最大的一块。 你的知识库目前只能当"FAQ 手册"用，不能当"文档问答"用。
+
+7.2 交互基线（最影响体感）
+能力	你的现状
+Markdown 渲染	❌ 纯文本
+代码高亮	❌ 0 命中
+LaTeX	❌
+停止生成	❌ 前端 0 命中，后端 signal 全 null
+编辑重跑 / 分支	❌
+多行输入（Shift+Enter）	❌ 单行 <input>
+拖拽上传文件	❌
+语音输入输出（TTS/STT）	❌（明确不做）
+图片生成	❌
+前四项任何一项缺失，都会让用户觉得"这不是 2026 年的 AI 产品"。
+
+7.3 Agent 能力
+能力	你的现状
+子 Agent 委派 / 并行	❌ 群聊是"顺序发言"，不是任务分解-委派
+Agent 间通信协议（A2A）	❌
+MCP Server（对外暴露能力）	❌ 只有 MCP Client
+人工审批工作流（DAG）	❌ 工作流是线性模板，非 DAG
+上下文压缩 / 摘要	⚠️ 代码已写但零调用
+语义级策略检索	⚠️ bigram Jaccard，阈值 0.25 极易误命中
+八、三大独家护城河（核心资产，值得深耕）
+8.1 先说实话：哪些不是独有的
+你可能以为独有	实际上
+MCP 客户端	Open WebUI、AnythingLLM、LibreChat 都有
+多提供商切换	Cherry Studio、LobeChat、LibreChat 都有，且做得更好
+RAG / 知识库	5 个头部项目都有，且是向量方案
+用量与成本看板	Cherry Studio、Msty 都有
+自主 Agent	Msty Claw、Open WebUI automations、AnythingLLM scheduled jobs 都有
+工作流	Dify / Flowise 做得远比你成熟
+桌面 GUI 自动化	云端有 Claude Computer Use / OmniParser，但那是 VLM 驱动
+8.2 真正稀缺的：三个"组合"
+你的护城河不在单点功能，而在别人没有做的组合。单个组件你都比不过头部项目，但下面三个组合，目前在开源/商业市场上都没见到等价物：
+
+★ 组合一：把「本地桌面」当成 Agent 的一等执行环境
+组件	说明
+UIA 控件树 + ref 机制	gui_windows/tree/find/click/type/screenshot 六个工具，直接操作 Windows 原生 UI
+stale ref 检测	uia-worker.ps1:96-104 主动报"重跑 gui_tree"——踩过坑的设计
+全局划词	Ctrl+Alt+X → 前台窗口 Ctrl+C → 剪贴板暂存 → 工作台复用划词工具条
+全局快捷键录制	Ctrl+Alt+Space/Ctrl+Alt+X 可重新按键录制，占用检测，持久化
+托盘 + 未读角标	20s 轮询，绘制红底数字角标，99+
+开机自启 + Job Object	退出时内核级清理 Node 子进程，杜绝僵尸进程
+竞品的 Agent 都活在浏览器和终端里。 你的 GUI 工具 + 全局划词 + 托盘壳构成了一个**"AI 住在你电脑里"**的完整闭环。云端 computer-use 需截图+推理（每步几千 token），你是本地 UIA 直读控件树，零 token 成本、零延迟、精确到控件 ID。
+
+★ 组合二：多 Agent 群聊的「成员治理」颗粒度
+能力	你的实现
+每群独立 AI 成员列表	不再所有群共用同一批 Agent
+成员级五项权限	发言/工具/写文件/命令/笔记，且在 executeTool 层强制
+发言频率四档	克制(1)/标准(2)/活跃(3)/仅@时
+@ 成员强制发言	即使意图识别未选中，被 @ 的成员强制进队列
+群号 + 资料 + 公告 + 标签 + 折叠/免打扰/置顶	完整
+引用回复 + 消息搜索 + 群文件 + 未读	完整
+Open WebUI 的 channels 更接近"团队协作"，不是微信式群聊的产品化治理。这个组合的真实价值是：把"多个 AI 变成一个可管理的组织"这件事做成了日常可用的产品形态。
+
+★ 组合三：人机信息隔离 + AI 工作日志
+能力	实现
+笔记三级可见性	private（仅人可读，AI 工具强制拒绝）/ shared（人机共读）/ agent（AI 工作记录）
+AI 工作日志 agent_journal	自主任务开始/规划/步骤/重规划/暂停/完成/结束 + 编码任务事件
+跨会话用户画像	主题词 + 高频意图，6h 刷新，超 14 天不注入（防陈旧污染）
+「private 笔记 AI 读不到」这个设计是有洞察的 —— 它承认了"人不一定想让 AI 看到一切"，并用架构强制而非 UI 提示来保证。竞品的记忆系统几乎都是"全量注入"，没有一个把"人的私有边界"做进数据访问层的。
+
+8.3 一个尚未成型、但最有潜力的独家方向
+把组合一（桌面自动化）和组合三（自主性 L3）打通：让 L3 自主任务在 GUI 层面执行，而不只是命令行。
+
+现有零件全都齐了：GUI 六工具 ✅ / L3 队列+重规划+评分 ✅ / 失败重规划 ✅ / 工作日志 ✅ / 笔记 ✅。缺的只是"规划器知道什么时候该用 GUI 工具"这一层路由。
+
+九、后续路线图
+核心原则：从 v2.9 起停止加功能，先还债。 理由：§2.3 的数据已经证明"功能广度"已经不是瓶颈，"已写功能没兑现"才是。
+
+阶段 0：止血（1~2 天，不加任何功能）⚡ 最高优先级
+#	动作	位置
+0.1	git init + 首次提交 + .gitignore（至少 .env data/ logs/ *.db* node_modules/）	项目根
+0.2	CONFIG_PERMISSION_LEVEL=2、SANDBOX_MODE=1	.env:68,70
+0.3	/api/open/config 移除明文 key	server.mjs:5667, 5693
+0.4	/api/providers/config、/api/config-permission 加 requireAdmin，并从家庭口令豁免名单移除	providers-service.mjs:137, 216；server.mjs:3830
+0.5	停止打印 ADMIN_PASSWORD 到日志	server.mjs:3846
+0.6	workspaceRoot 改用 getWorkspaceRoot()；.env/data/logs/node_modules/runtime 加入读取拒绝名单	server.mjs:2729；tools.mjs:446
+0.1 是所有工作的前置。没有 git，后面任何重构都是在裸奔。
+
+阶段 1：兑现已宣称功能（1~2 周）
+#	动作	位置	兑现的文档承诺
+1.1	修前端 SSE 解析（{stream:true} + buffer 残留）	index.html:3315-3332	全部"实测无报错"结论
+1.2	群聊补历史：priorMessages 对所有 provider 生效	server.mjs:1609-1664	"多轮对话"
+1.3	接线上下文压缩：调用已写好的 toolPairPreservingSlice/getTruncatedSummary；工具输出加长度上限	tools.mjs:920/976；providers.mjs:547-552	避免长会话爆 context
+1.4	修评分：把 status/error 传给 scoreAutonomousStep；verified 改为"工具调用成功且有输出"	server.mjs:3019-3028, 3193-3196	"自主学习/进化"
+1.5	修策略匹配：阈值 0.25→0.5+，TF-IDF 或 bigram 去停用词；use_count 仅执行后验证才 +1	autonomy-service.mjs:512-535	"策略沉淀与复用"
+1.6	修主动服务：extractPatterns 真填 newKnowledge；中文分词改 bigram	proactive-service.mjs:56-86, 122-125	"L2 主动建议"
+1.7	接上停止生成：前端 AbortController + 停止按钮；后端 res.on('close') 调 controller.abort()，signal 透传	index.html:3314；server.mjs:1924-1929	基础交互
+1.8	修 XSS：addMessage/addToolEvent/renderConfirmCard/showNotification + admin.html:1916 统一转义	§4.4 全部位置	—
+1.9	add_knowledge 加入 TOOLS_OPENAI/TOOLS_CLAUDE	tools.mjs:15-166, 168-289	"知识库闭环"
+阶段 2：补齐产品基线（2~3 周）
+#	动作	理由
+2.1	Markdown 渲染 + 代码高亮 + 复制按钮（先转义后解析，禁 innerHTML 直插）	最高频体验缺失
+2.2	多行输入（<textarea> + Shift+Enter）+ 拖拽上传 + 历史命令 ↑↓	基础输入体验
+2.3	消息管理：删除单条 / 编辑重跑 / 复制 / 分支（需加后端路由）	竞品基线
+2.4	模型调用韧性：signal 必填 + AbortSignal.timeout；指数退避重试（仅 429/5xx/网络错误）；getModelRoutes() 第二个模型作 fallback	当前零重试，一次抖动整轮失败
+2.5	依赖声明：补 app/package.json 的 dependencies + package-lock.json，跑一次 npm install 固化	项目不可复现
+2.6	Claude token 解析：补 message_start/message_delta 的 usage；修正中文估算公式	成本看板可信度
+阶段 3：知识层升级（3~5 周）—— 追平市场基线
+#	动作
+3.1	文档摄取：PDF / docx / pptx / xlsx / 网页 / Markdown 导入，走独立文档表（不复用 FAQ 表）
+3.2	分块 + embedding + 向量检索：text-embedding-3-small 或本地 bge-m3；向量存 SQLite-vec 或 LanceDB
+3.3	混合检索：BM25（FTS5 已有）+ 向量，RRF 融合，用回 bm25 或向量分数做排序
+3.4	Rerank：接 cross-encoder 或用 LLM 重排 top-20
+3.5	网页抓取工具：web_fetch / web_search，补齐 @ 菜单的第四类来源
+这一阶段做完，知识库才从"FAQ 手册"变成"文档大脑"，才算真正追上 AnythingLLM 的下限。
+
+阶段 4：把独家资产做深（持续，最高战略价值）
+#	动作
+4.1	GUI × L3 融合（最高战略价值）：规划器增加"任务类型判定"——需要操作 GUI 时走 UIA 工具链 + 截图验证；这条线一旦跑通，是竞品无法快速复制的
+4.2	GUI 工具加固：ref 池加 LRU 上限；gui_screenshot 走 toRealPath 校验；命令黑名单换成 Windows 真实约束（受限令牌 / Job Object），至少把 powershell/cmd/certutil/bitsadmin/mshta/node/python 改为白名单制
+4.3	三级笔记的可视化：让人明确看到"AI 现在能看到什么"（隐私心智，比功能更有说服力）
+4.4	开放 API 强化：多 Key + 每 Key 独立权限与限流；Webhook 加 HMAC 签名 + 重试
+4.5	插件市场：远程 store_items 分发 + 版本管理（现在只有 4 条本地记录）
+阶段 5：工程质量（贯穿全程）
+#	动作	优先级
+5.1	server.mjs 抽出 createServer({ db, port }) 工厂，模块顶层不碰 DB/端口/定时器 —— 这是补测试的前置阻塞项	高
+5.2	补 node:test 冒烟测试：工具权限矩阵、路径护栏、评分函数、循环任务时间计算	高
+5.3	拆 server.mjs：路由 → routes/*.mjs，6 个模式运行器合并为参数化实现	中
+5.4	拆 index.html：外链 CSS/JS，type="module"，接入 Vite + TypeScript	中
+5.5	全局错误中间件 + uncaughtException 改为退出并由托盘重启	中
+5.6	.env 写入统一为带锁的原子替换（消除 5 套实现）	中
+5.7	消息表分页 + getMessagesBySession 加 LIMIT；前端虚拟滚动	中
+十、新验收基线（替代现有的 verify-all.mjs）
+[ ] git 仓库存在，.gitignore 覆盖 .env / data / logs
+[ ] 未认证访问 /api/sessions 返回 401
+[ ] GET /api/open/config 响应中不含完整 key（断言 !json.key || json.key === json.keyMasked）
+[ ] 模型 read_file(".env") 被拒绝
+[ ] 中文长回复（>2000 字）无 U+FFFD，无 token 丢失
+[ ] 群聊第 5 轮提问时，模型能引用第 1 轮的内容
+[ ] 生成中点击「停止」，上游 fetch 在 2s 内 abort
+[ ] write_file 失败两次 → 评分 < 0.4（不是 1.0）
+[ ] "要整理知识库就调 add_knowledge" → 工具列表中确实有 add_knowledge
+[ ] 知识库搜「保质期多久」能命中「保质期 30 天」条目
+[ ] 代码块 ``` 渲染为高亮 <pre><code>
+[ ] npm install 后可完整启动（依赖已声明）
+十一、附录
+11.1 缺陷严重度汇总
+级别	数量	代表
+P0 致命	5	零鉴权攻击链 / 前端 UTF-8 乱码 / 群聊零记忆 / XSS / 无法中断
+P1 严重	7	无 Markdown / 评分可刷分 / 无向量检索 / 主动服务不可达 / Claude 统计失真
+P2 债务	6 类	无 git / 单文件巨型 / 死代码 / 无错误中间件 / 客户端自定权限
+11.2 文档与代码不一致清单（说明项目文档可信度需要重建）
+文档声称	代码实际
+"L3 策略沉淀 ✅ 实测通过"	strategy_library 表 0 行；评分可刷分；匹配阈值 0.25
+"L3 长程目标 ✅ 实测通过"	agent_goals 表 0 行
+"主动服务：规则分析 + 建议卡片"	三条分支两条恒不可达
+"知识库：FTS5 全文索引 + 打分"	无向量；bm25 被丢弃；打分是子串匹配
+"上下文：短期/长期记忆注入"	群聊直连路径完全不传历史
+"浏览器控制台无页面自身 JS 报错"	SSE 解析器 UTF-8 缺陷（低频触发）
+"知识库闭环"	add_knowledge 从未暴露给模型
+根因：verify-all.mjs 只做 typeof 存在性检查就打印"✅ 全部正常"。验证方式与声明的验收标准不匹配。
+
+11.3 关键文件索引
+用途	路径
+主服务	E:\智能体ai\app\server.mjs（7552 行）
+主工作台	E:\智能体ai\app\dist\index.html（7658 行）
+后台管理	E:\智能体ai\app\dist\admin.html（3345 行）
+工具与权限	E:\智能体ai\app\engine\tools.mjs（998 行）
+模型引擎	E:\智能体ai\app\engine\providers.mjs（578 行）
+自主性 L2/L3	E:\智能体ai\app\engine\autonomy-service.mjs（966 行）
+主动服务/记忆/学习	E:\智能体ai\app\engine\proactive-service.mjs（464 行）
+桌面自动化	E:\智能体ai\app\engine\uia.mjs / uia-worker.ps1 / screen.mjs
+桌面壳	E:\智能体ai\Launcher.cs（1398 行）
+数据库	E:\智能体ai\data\chat.db（30 表，WAL）
+更新日志	E:\智能体ai\更新日志.md（v0.1 → v2.9）
+11.4 版本演进（关键里程碑）
+版本	主题	关键里程碑
+v0.1	地基版	可运行的多 Agent 群聊
+v0.3	AI 神殿扩展	6 模式 + 知识库 + 自主性路线
+v0.5	知识库闭环 + 多模态 + 自主进化	search_knowledge_base 工具、FTS5、图片理解
+v0.9	表演型执行修复	6 模式全部改为 runDirectTurn 真实执行
+v1.0	提示词约束 + 智力六档 + 审计 + Token	三类提示词强制约束、六档评分
+v1.2	MCP 真连接 + 沙箱 + 数据库页	stdio/SSE/HTTP 三传输、文件级沙箱
+v1.5	L2/L3 收尾	后台巡检、画像、任务队列、重规划、策略、目标
+v1.6	主界面产品化	助手库 + 多标签 + @ 引用
+v1.7	设置中心 + 用量中心	5+1 页签、成本估算、热力图
+v1.9	家庭成员版	访问口令 + 编码搭档 + 笔记三级可见性 + 模型分工
+v2.0	页面内划词助手	翻译/解释/总结/存笔记/复制
+v2.2	群聊管理	群资料/群号/独立成员/五项权限/扩容
+v2.5	群聊体验 + 插件编排 + 开放 API	@成员/消息搜索/群文件/插件表单/Webhook
+v2.7	最小桌面壳	托盘常驻、开机自启、系统通知
+v2.8	桌面壳增强	全局快捷键、全局划词、托盘未读角标
+v2.9	群聊深化 + 策略效果回归	@全体/消息撤回/策略复用统计与淘汰（当前）
+十二、给决策者的三句话建议
+今天第一件事：git init —— 你已有 2.4 万行、6 天 19 个版本，却无任何版本控制，这是最大的单点风险。
+停止加新功能，先把 "文档宣称 ✅ 但代码未兑现" 的 9 项（阶段 1）闭环。数据已经证明：46 群 96 条消息 = 群聊核心形态未建立起来，功能广度不是瓶颈，兑现度才是。
+GUI × L3 融合是你的王牌。云端 computer-use 成本高、延迟大、精度低；你的本地 UIA 直读控件树是降维打击。只要规划器学会"这任务要操作 GUI"，你就拥有了竞品无法快速复制的护城河。
