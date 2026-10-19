@@ -7,6 +7,7 @@ import { dirname, join, resolve } from "path";
 
 import fs from "fs";
 import crypto from "crypto";
+import { execSync } from "node:child_process";
 import { v4 as uuidv4 } from "uuid";
 import Database from "better-sqlite3";
 
@@ -89,6 +90,18 @@ import {
 import {
   createJournalService, bindJournalService, appendJournal, parseMaybeJson
 } from "./engine/journal.mjs";
+
+// ==================== Windows 控制台编码 ====================
+// 中文 banner（框线字符）在 GBK 代码页下会乱码，运行时切到 UTF-8
+if (process.platform === "win32") {
+  try {
+    execSync("chcp 65001", { stdio: "ignore" });
+    process.stdout.setDefaultEncoding?.("utf8");
+    process.stderr.setDefaultEncoding?.("utf8");
+  } catch {
+    /* chcp 失败不影响功能 */
+  }
+}
 
 // ==================== 环境初始化 ====================
 const __filename = fileURLToPath(import.meta.url);
@@ -1118,6 +1131,23 @@ const server = app.listen(PORT, BIND_HOST, () => {
   }, 1200);
 });
 
+// 启动期错误：端口占用最常见，给出可操作提示后明确退出
+server.on("error", (err) => {
+  if (err?.code === "EADDRINUSE") {
+    const host = isLoopbackHost(BIND_HOST) ? "localhost" : BIND_HOST;
+    console.error("");
+    console.error(`[Server] 端口 ${PORT} 已被占用`);
+    console.error(`        · 已有实例在运行 → 直接访问 http://${host}:${PORT}`);
+    console.error(`        · 需要重启 → 执行 停止.bat，或运行: taskkill /F /IM node.exe`);
+    console.error(`        · 想换端口 → 修改 .env 里的 PORT`);
+    console.error("");
+    try { db.close(); } catch { /* 忽略 */ }
+    process.exit(1);
+  }
+  console.error("[Server] 启动失败:", err?.stack || err);
+  process.exit(1);
+});
+
 // ==================== 定时任务 ====================
 function checkpointDb() {
   try {
@@ -1174,7 +1204,14 @@ function shutdown(signal) {
 
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
-process.on("uncaughtException", (err) => console.error("[Server] 未捕获异常(进程继续运行):", err?.stack || err));
+process.on("uncaughtException", (err) => {
+  // 端口占用 / 模块缺失这类致命错误必须退出，否则进程空转假装在跑
+  if (err?.code === "EADDRINUSE" || err?.code === "MODULE_NOT_FOUND") {
+    console.error("[Server] 致命错误:", err?.message || err);
+    process.exit(1);
+  }
+  console.error("[Server] 未捕获异常(进程继续运行):", err?.stack || err);
+});
 process.on("unhandledRejection", (reason) => console.error("[Server] 未处理的 Promise 拒绝(进程继续运行):", reason));
 
 // 导出供其他模块使用
