@@ -1,0 +1,236 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+命令行界面（ui/cli.py）—— M1 的界面层，只调 core，不碰引擎细节。
+
+用法:
+  python -m client.ui.cli --db client.db intake --pipeline-data data.json
+  python -m client.ui.cli --db client.db intake --feed feed.csv --link "vless://..."
+  python -m client.ui.cli --db client.db list --scene support
+  python -m client.ui.cli --db client.db pin <node_id>
+  python -m client.ui.cli --db client.db verify <node_id>
+  python -m client.ui.cli --db client.db connect <node_id>
+  python -m client.ui.cli --db client.db status / disconnect
+
+注：connect 的会话状态只在本进程内有效（M1 CLI 形态）；常驻守护/托盘在 M3。
+verify 默认走真实 probe（本机测量）；测试通过 main(probe_factory=...) 注入假 probe。
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+
+from ..core import history
+from ..core.model import SCENES, SOURCES
+from ..core.orchestrator import Orchestrator, OrchestratorError
+from ..core.store import Store
+from ..core.verify import apply_outcome, make_real_probe, verify_exit
+from ..sources import feed as feed_src
+from ..sources import manual as manual_src
+from ..sources import pipeline as pipeline_src
+
+DEFAULT_DB = os.environ.get(
+    "GATE_CLIENT_DB",
+    os.path.join(os.path.expanduser("~"), ".local", "share", "gate-client", "client.db"))
+
+
+def _err(msg: str) -> int:
+    print(f"[错误] {msg}", file=sys.stderr)
+    return 2
+
+
+def _fmt_node(n) -> str:
+    ep = n.exit_profile
+    scenes = "/".join(sorted(n.scenes)) or "-"
+    lat = f"{n.metrics.latency_ms:.0f}ms" if n.metrics.latency_ms is not None else "?"
+    exit_s = ep.ip or "未验"
+    marks = ("📌" if n.pinned else "") + ("🚫" if n.banned else "")
+    return (f"{n.id}  {n.name}  [{n.protocol}/{n.source}] 出口={exit_s} "
+            f"{ep.network_type} 延迟={lat} 场景={scenes} {marks}".rstrip())
+
+
+# ---------------------------------------------------------------------------
+def cmd_intake(store: Store, args) -> int:
+    nodes = []
+    try:
+        if args.pipeline_data:
+            nodes += pipeline_src.load_data_json_file(args.pipeline_data)
+        if args.pipeline_nodes:
+            nodes += pipeline_src.load_nodes_text_file(args.pipeline_nodes)
+        if args.feed:
+            nodes += feed_src.load_feed_file(args.feed)
+        for link in args.link or []:
+            nodes.append(manual_src.parse_link(link))
+        for path in args.ovpn or []:
+            nodes.append(manual_src.load_ovpn_file(path))
+    except FileNotFoundError as exc:
+        return _err(f"文件不存在: {exc.filename}")
+    except (ValueError, RuntimeError) as exc:
+        return _err(f"导入失败: {exc}")
+    if not nodes:
+        return _err("没有导入任何节点（检查参数或文件内容）")
+    store.upsert_nodes(nodes)
+    print(f"已收纳 {len(nodes)} 个节点（库内共 {store.count_nodes()} 个）")
+    return 0
+
+
+def cmd_list(store: Store, args) -> int:
+    """默认视图 = 按来源分组的四页（来源第一维度）；场景只是页内过滤。"""
+    from ..core.history import sorted_nodes
+    from ..core.model import SOURCE_LABELS, SOURCES
+    nodes = store.list_nodes(scene=args.scene, include_banned=args.all)
+    if args.source:
+        groups = [(args.source, [n for n in nodes if n.source == args.source])]
+    else:
+        groups = [(src, [n for n in nodes if n.source == src]) for src in SOURCES]
+        known = {src for src, _ in groups}
+        for extra_src in sorted({n.source for n in nodes} - known):
+            groups.append((extra_src, [n for n in nodes if n.source == extra_src]))
+    total = 0
+    for src, members in groups:
+        label = SOURCE_LABELS.get(src, src)
+        print(f"== {src}（{label}）：{len(members)} 个 ==")
+        if not members:
+            print("  （空）")
+        for n in sorted_nodes(store, members):
+            print("  " + _fmt_node(n))
+        total += len(members)
+    if total == 0:
+        print("没有符合条件的节点。先用 intake 导入。")
+    else:
+        print(f"共 {total} 个")
+    return 0
+
+
+def cmd_flag(store: Store, args, flag: str) -> int:
+    setter = store.set_pinned if flag == "pin" else store.set_banned
+    value = not args.off
+    if not setter(args.node_id, value):
+        return _err(f"节点不存在: {args.node_id}")
+    print(f"已{'设置' if value else '取消'} {flag}: {args.node_id}")
+    return 0
+
+
+def cmd_verify(store: Store, args, probe_factory) -> int:
+    node = store.get_node(args.node_id)
+    if node is None:
+        return _err(f"节点不存在: {args.node_id}（先用 intake 导入）")
+    stats = history.stats_for(store, node.id)
+    outcome = verify_exit(node, probe_factory(), stable=stats.stable)
+    if not outcome.ok:
+        history.record(store, node.id, "verify", False, detail=outcome.reason)
+        return _err(f"验出口失败: {outcome.reason}")
+    apply_outcome(node, outcome)
+    store.upsert_node(node)
+    history.record(store, node.id, "verify", True,
+                   exit_ip=node.exit_profile.ip, detail="验出口通过")
+    ep = node.exit_profile
+    print(f"出口 {ep.ip} / {ep.country}({ep.country_code}) / {ep.network_type} "
+          f"org={ep.org} 干净={ep.is_clean} 脏标记={sorted(ep.dirty) or '-'} "
+          f"场景={sorted(node.scenes) or '-'} muse={'可' if outcome.muse_ok else '拒/未测'}")
+    return 0
+
+
+def _build_orchestrator(store: Store, probe_factory, engine_factory=None) -> Orchestrator:
+    engines = {}
+    if engine_factory is not None:
+        engines = engine_factory()
+    else:
+        from ..engines.openvpn_engine import OpenVPNEngine
+        out_dir = os.path.join(os.path.dirname(os.path.abspath(store.path or "client.db")),
+                               "ovpn_out")
+        engines = {"openvpn": OpenVPNEngine(out_dir=out_dir)}
+    probe = probe_factory()
+    return Orchestrator(store, engines, lambda node: verify_exit(node, probe))
+
+
+def cmd_connect(store: Store, args, probe_factory, engine_factory=None) -> int:
+    orch = _build_orchestrator(store, probe_factory, engine_factory)
+    try:
+        ev = orch.connect(args.node_id)
+    except OrchestratorError as exc:
+        return _err(str(exc))
+    print(f"[{ev.kind}] {ev.node_id} {ev.detail}")
+    if ev.kind == "connected":
+        # M1 CLI 是单次进程形态：完成「引擎启动 + 验出口」全流程验证后随即
+        # 干净断开，避免留下孤儿隧道进程。常驻连接（托盘）在 M3。
+        orch.disconnect()
+        print("（CLI 单次形态：验证通过后已断开，常驻连接在 M3 提供）")
+    return 0 if ev.kind == "connected" else 1
+
+
+def cmd_status(store: Store, args) -> int:
+    total = store.count_nodes()
+    print(f"节点库: {total} 个节点（db={store.path}）")
+    print("会话: CLI 为单次命令形态，常驻会话状态在 M3 托盘提供；"
+          "connect 命令在本进程内完成 引擎启动+验出口 全流程校验。")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+def build_parser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(prog="gate-client", description="自研代理客户端（M1 核心 CLI）")
+    ap.add_argument("--db", default=DEFAULT_DB, help=f"本地数据库路径（默认 {DEFAULT_DB}）")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    p = sub.add_parser("intake", help="收纳节点：来源文件/链接 → 本地库")
+    p.add_argument("--pipeline-data", help="vpngate 流水线 data.json")
+    p.add_argument("--pipeline-nodes", help="流水线 nodes_*.txt / subscription.txt")
+    p.add_argument("--feed", help="VPN Gate feed 文件（CSV 或镜像 JSON）")
+    p.add_argument("--link", action="append", help="单个分享链接（可重复）")
+    p.add_argument("--ovpn", action="append", help=".ovpn 文件（可重复）")
+
+    p = sub.add_parser("list", help="列出节点（默认按来源分四页输出）")
+    p.add_argument("--source", choices=list(SOURCES), help="只看某一页")
+    p.add_argument("--scene", choices=list(SCENES), help="页内按场景过滤")
+    p.add_argument("--all", action="store_true", help="包含已拉黑节点")
+
+    for flag in ("pin", "ban"):
+        p = sub.add_parser(flag, help=f"{'置顶' if flag == 'pin' else '拉黑'}节点（--off 取消）")
+        p.add_argument("node_id")
+        p.add_argument("--off", action="store_true")
+
+    p = sub.add_parser("verify", help="对指定节点验出口（本机真实测量）")
+    p.add_argument("node_id")
+    p.add_argument("--proxy", help="经本地代理测（sing-box 代理模式用），如 127.0.0.1:1080")
+
+    p = sub.add_parser("connect", help="连接指定节点（显式点选，绝不自动切换）")
+    p.add_argument("node_id")
+
+    sub.add_parser("disconnect", help="断开（CLI 形态下无常驻会话，仅提示）")
+    sub.add_parser("status", help="查看节点库与会话说明")
+    return ap
+
+
+def main(argv=None, probe_factory=None, engine_factory=None) -> int:
+    args = build_parser().parse_args(argv)
+    if probe_factory is None:
+        proxy = getattr(args, "proxy", None)
+        probe_factory = lambda: make_real_probe(proxy=proxy)  # noqa: E731
+    store = Store(args.db)
+    try:
+        if args.cmd == "intake":
+            return cmd_intake(store, args)
+        if args.cmd == "list":
+            return cmd_list(store, args)
+        if args.cmd in ("pin", "ban"):
+            return cmd_flag(store, args, args.cmd)
+        if args.cmd == "verify":
+            return cmd_verify(store, args, probe_factory)
+        if args.cmd == "connect":
+            return cmd_connect(store, args, probe_factory, engine_factory)
+        if args.cmd == "disconnect":
+            print("CLI 形态下没有常驻会话可断开（连接在 connect 进程内管理）；"
+                  "常驻断开在 M3 托盘提供。")
+            return 0
+        if args.cmd == "status":
+            return cmd_status(store, args)
+        return _err(f"未知命令: {args.cmd}")
+    finally:
+        store.close()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
