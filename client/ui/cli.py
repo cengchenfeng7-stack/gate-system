@@ -185,13 +185,15 @@ def _build_orchestrator(store: Store, probe_factory, engine_factory=None) -> Orc
     probe = probe_factory()
 
     def verifier(node):
-        # sing-box 引擎是本地代理模式：流量必须经引擎自己的 SOCKS5 出网，
+        # sing-box 引擎是本地代理模式：流量必须经引擎自己的代理出网，
         # 直连验出口测到的是用户本机 IP（假连当真连，P0）。按引擎类型分流、
-        # 不看协议名；proxy 取引擎实例自己的 proxy_url（端口可能被构造参数改过）。
+        # 不看协议名；proxy 取引擎实例自己的 http_proxy_url（端口可能被
+        # 构造参数改过）。走 HTTP 入站而非 SOCKS：探针基于 urllib、只会说
+        # HTTP 代理（2026-11-20 真机验收实测：SOCKS 地址给 urllib 必全灭）。
         # OpenVPN 是 TUN/隧道模式，维持现状：用 probe_factory() 造的那一个 probe。
         engine = engines.get(node.protocol)
         if isinstance(engine, SingBoxEngine):
-            return verify_exit(node, make_real_probe(proxy=engine.proxy_url))
+            return verify_exit(node, make_real_probe(proxy=engine.http_proxy_url))
         return verify_exit(node, probe)
 
     return Orchestrator(store, engines, verifier)

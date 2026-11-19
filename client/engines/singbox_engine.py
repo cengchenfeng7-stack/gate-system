@@ -122,6 +122,19 @@ class SingBoxEngine:
             raise EngineError(f"sing-box 配置生成失败: {exc}") from exc
         return {
             "log": {"level": "warn", "timestamp": True},
+            # 目标域名必须在出口侧解析（remote-dns 经 node-out 绕行）：本机
+            # 解析器可能被其他代理的 fake-ip 劫持，解析出的假 IP 送到出口
+            # 服务器毫无意义、连接必死（2026-11-20 真机验收实测教训）；
+            # 同时避免 DNS 泄漏。节点服务器自身的域名走 local-dns 本地
+            # 解析（默认 final），否则绕行解析会先有鸡还是先有蛋。
+            "dns": {
+                "servers": [
+                    {"type": "udp", "tag": "remote-dns", "server": "8.8.8.8",
+                     "server_port": 53, "detour": _OUT_TAG},
+                    {"type": "local", "tag": "local-dns"},
+                ],
+                "final": "local-dns",
+            },
             "inbounds": [
                 {"type": "socks", "tag": "socks-in",
                  "listen": "127.0.0.1", "listen_port": self.socks_port},
@@ -129,7 +142,14 @@ class SingBoxEngine:
                  "listen": "127.0.0.1", "listen_port": self.http_port},
             ],
             "outbounds": [outbound],
-            "route": {"final": _OUT_TAG},
+            "route": {
+                "rules": [{"action": "resolve", "server": "remote-dns",
+                           "strategy": "ipv4_only"}],
+                "final": _OUT_TAG,
+                # 出站服务器域名一律走本地解析（sing-box 1.14 硬性要求
+                # 显式指定 domain_resolver，否则 check 直接 FATAL）
+                "default_domain_resolver": "local-dns",
+            },
         }
 
     @staticmethod
@@ -286,6 +306,12 @@ class SingBoxEngine:
     @property
     def proxy_url(self) -> str:
         return f"socks5://127.0.0.1:{self.socks_port}"
+
+    @property
+    def http_proxy_url(self) -> str:
+        """HTTP 入站的代理地址。验出口探针（urllib）只会说 HTTP 代理、
+        不会 SOCKS5，所以探针走这条；流量仍经同一个 node-out 出站。"""
+        return f"http://127.0.0.1:{self.http_port}"
 
     def start(self, node: Node, on_event=None):
         binary = self.find_binary()

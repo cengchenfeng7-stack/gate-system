@@ -122,8 +122,10 @@ class TestBasics(unittest.TestCase):
         eng = SingBoxEngine()
         self.assertEqual(eng.name, "sing-box")
         self.assertEqual(eng.proxy_url, "socks5://127.0.0.1:10808")
-        eng = SingBoxEngine(socks_port=18089)
+        self.assertEqual(eng.http_proxy_url, "http://127.0.0.1:10809")
+        eng = SingBoxEngine(socks_port=18089, http_port=18090)
         self.assertEqual(eng.proxy_url, "socks5://127.0.0.1:18089")
+        self.assertEqual(eng.http_proxy_url, "http://127.0.0.1:18090")
 
     def test_status_stop_of_none_handle(self):
         eng = SingBoxEngine()
@@ -139,6 +141,22 @@ class TestBuildConfig(unittest.TestCase):
         cfg = self.eng.build_config(node)
         self.assertEqual(len(cfg["outbounds"]), 1)
         return cfg["outbounds"][0]
+
+    def test_dns_remote_resolution_detours_through_node(self):
+        # 真机验收教训（2026-11-20）：目标域名必须在出口侧解析——本机
+        # 解析器被 fake-ip 劫持时，假 IP 送到出口服务器连接必死；
+        # 节点服务器自身域名走本地解析（final=local-dns）防自举死锁。
+        cfg = self.eng.build_config(vless_node({"security": "tls"}))
+        servers = {s["tag"]: s for s in cfg["dns"]["servers"]}
+        self.assertEqual(servers["remote-dns"]["type"], "udp")
+        self.assertEqual(servers["remote-dns"]["detour"], "node-out")
+        self.assertEqual(servers["local-dns"]["type"], "local")
+        self.assertEqual(cfg["dns"]["final"], "local-dns")
+        self.assertEqual(cfg["route"]["rules"],
+                         [{"action": "resolve", "server": "remote-dns",
+                           "strategy": "ipv4_only"}])
+        self.assertEqual(cfg["route"]["final"], "node-out")
+        self.assertEqual(cfg["route"]["default_domain_resolver"], "local-dns")
 
     def test_vless_basic_tls(self):
         out = self.outbound(vless_node(
@@ -263,14 +281,18 @@ class TestRedLines(unittest.TestCase):
                 cfg = json.loads(text)
                 self.assertEqual(len(cfg["outbounds"]), 1)
                 self.assertEqual(cfg["outbounds"][0]["tag"], "node-out")
-                self.assertEqual(cfg["route"], {"final": "node-out"})
+                # route.final 必须仍是 node-out；允许仅含 resolve 动作的
+                # 规则（出口侧解析目标域名），不得引入任何切换类动作
+                self.assertEqual(cfg["route"]["final"], "node-out")
+                for rule in cfg["route"].get("rules", []):
+                    self.assertEqual(rule.get("action"), "resolve")
 
     def test_top_level_keys_exact(self):
         for node in self._nodes():
             with self.subTest(protocol=node.protocol):
                 cfg = self.eng.build_config(node)
                 self.assertEqual(set(cfg.keys()),
-                                 {"log", "inbounds", "outbounds", "route"})
+                                 {"log", "dns", "inbounds", "outbounds", "route"})
                 self.assertEqual(cfg["log"], {"level": "warn", "timestamp": True})
 
     def test_inbounds_localhost_only_and_ports_match_ctor(self):

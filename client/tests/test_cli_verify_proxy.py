@@ -25,8 +25,8 @@ from client.ui import cli
 VLESS_LINK = ("vless://11111111-2222-3333-4444-555555555555"
               "@example.com:443?security=tls#vless-proxy-verify")
 
-DEFAULT_PROXY = "socks5://127.0.0.1:10808"      # SingBoxEngine 默认 socks_port
-CUSTOM_PROXY = "socks5://127.0.0.1:18089"       # 构造参数改过端口的
+DEFAULT_PROXY = "http://127.0.0.1:10809"      # SingBoxEngine 默认 http_port（探针走 HTTP 入站）
+CUSTOM_PROXY = "http://127.0.0.1:18089"       # 构造参数改过端口的
 
 
 class FakeSingBoxEngine(SingBoxEngine):
@@ -83,7 +83,7 @@ class TestVerifyThroughProxy(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    # 1. vless + 真 SingBoxEngine 实例（子类假实现）→ 验出口经引擎 proxy_url
+    # 1. vless + 真 SingBoxEngine 实例（子类假实现）→ 验出口经引擎 http_proxy_url
     def test_vless_via_singbox_engine_verifies_through_proxy(self):
         rc, out, err = self._connect_vless(FakeSingBoxEngine())
         self.assertEqual(rc, 0, err)
@@ -113,9 +113,9 @@ class TestVerifyThroughProxy(unittest.TestCase):
         self.assertEqual(self.rec.factory_probe_calls, 1)   # 走的是 probe_factory 探针
         self.assertIn("5.6.7.8", out)
 
-    # 3. 自定义端口 → proxy 用引擎实例自己的，不许写死 10808
-    def test_custom_socks_port_is_used_not_hardcoded(self):
-        rc, out, err = self._connect_vless(FakeSingBoxEngine(socks_port=18089))
+    # 3. 自定义端口 → proxy 用引擎实例自己的 http_proxy_url，不许写死 10809
+    def test_custom_http_port_is_used_not_hardcoded(self):
+        rc, out, err = self._connect_vless(FakeSingBoxEngine(http_port=18089))
         self.assertEqual(rc, 0, err)
         self.assertIn("connected", out)
         self.assertEqual(self.rec.make_real_args, [CUSTOM_PROXY])
