@@ -99,7 +99,7 @@ class Orchestrator:
         engine = self.engines.get(node.protocol)
         if engine is None:
             raise OrchestratorError(
-                f"协议 {node.protocol} 暂无引擎（M1 仅 OpenVPN，sing-box 在 M2）: {node_id}")
+                f"协议 {node.protocol} 暂无引擎: {node_id}")
 
         self._emit("connect_started", node_id)
         try:

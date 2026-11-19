@@ -6,6 +6,8 @@
 用法:
   python -m client.ui.cli --db client.db intake --pipeline-data data.json
   python -m client.ui.cli --db client.db intake --feed feed.csv --link "vless://..."
+  python -m client.ui.cli --db client.db import-subscription --file sub.txt [--name 名称]
+  python -m client.ui.cli --db client.db import-subscription --url <订阅地址>
   python -m client.ui.cli --db client.db list --scene support
   python -m client.ui.cli --db client.db pin <node_id>
   python -m client.ui.cli --db client.db verify <node_id>
@@ -14,6 +16,7 @@
 
 注：connect 的会话状态只在本进程内有效（M1 CLI 形态）；常驻守护/托盘在 M3。
 verify 默认走真实 probe（本机测量）；测试通过 main(probe_factory=...) 注入假 probe。
+import-subscription 的输出只报汇总数字与格式，不回显订阅地址、不打印节点链接原文。
 """
 
 from __future__ import annotations
@@ -27,9 +30,12 @@ from ..core.model import SCENES, SOURCES
 from ..core.orchestrator import Orchestrator, OrchestratorError
 from ..core.store import Store
 from ..core.verify import apply_outcome, make_real_probe, verify_exit
+from ..engines.openvpn_engine import OpenVPNEngine
+from ..engines.singbox_engine import SINGBOX_PROTOCOLS, SingBoxEngine
 from ..sources import feed as feed_src
 from ..sources import manual as manual_src
 from ..sources import pipeline as pipeline_src
+from ..sources import subscription as subscription_src
 
 DEFAULT_DB = os.environ.get(
     "GATE_CLIENT_DB",
@@ -73,6 +79,38 @@ def cmd_intake(store: Store, args) -> int:
         return _err("没有导入任何节点（检查参数或文件内容）")
     store.upsert_nodes(nodes)
     print(f"已收纳 {len(nodes)} 个节点（库内共 {store.count_nodes()} 个）")
+    return 0
+
+
+def cmd_import_subscription(store: Store, args, fetcher=None) -> int:
+    """订阅导入本地库：--file 本地文件 / --url 订阅地址（恰好一个）。
+    fetcher 默认 subscription_src.fetch_subscription_text（测试注入假 fetcher）。
+    输出红线：只报汇总数字与格式，不回显订阅地址全文、不打印节点链接原文。"""
+    if fetcher is None:
+        fetcher = subscription_src.fetch_subscription_text
+    if bool(args.file) == bool(args.url):
+        return _err("import-subscription 需要 --file 与 --url 二选一（恰好一个）")
+    subscription_name = args.name or ""
+    try:
+        if args.file:
+            res = subscription_src.load_subscription_file(
+                args.file, subscription_name=subscription_name)
+        else:
+            text = fetcher(args.url)
+            res = subscription_src.parse_subscription_text(
+                text, subscription_url=args.url, subscription_name=subscription_name)
+    except FileNotFoundError as exc:
+        return _err(f"文件不存在: {exc.filename}")
+    except ValueError as exc:
+        return _err(f"导入失败: {exc}")
+    except OSError as exc:   # 含 URLError / HTTPError / socket.timeout
+        return _err(f"拉取订阅失败: {exc}")
+    if not res.nodes:
+        return _err("没有解析出任何节点（检查订阅内容或格式；"
+                    "sing-box JSON / Clash YAML 暂不支持）")
+    store.upsert_nodes(res.nodes)
+    print(f"已收纳 {len(res.nodes)} 个节点（跳过坏行 {res.skipped}，"
+          f"格式 {res.source_format}，库内共 {store.count_nodes()} 个）")
     return 0
 
 
@@ -138,12 +176,25 @@ def _build_orchestrator(store: Store, probe_factory, engine_factory=None) -> Orc
     if engine_factory is not None:
         engines = engine_factory()
     else:
-        from ..engines.openvpn_engine import OpenVPNEngine
         out_dir = os.path.join(os.path.dirname(os.path.abspath(store.path or "client.db")),
                                "ovpn_out")
+        singbox = SingBoxEngine()
         engines = {"openvpn": OpenVPNEngine(out_dir=out_dir)}
+        for proto in SINGBOX_PROTOCOLS:
+            engines[proto] = singbox
     probe = probe_factory()
-    return Orchestrator(store, engines, lambda node: verify_exit(node, probe))
+
+    def verifier(node):
+        # sing-box 引擎是本地代理模式：流量必须经引擎自己的 SOCKS5 出网，
+        # 直连验出口测到的是用户本机 IP（假连当真连，P0）。按引擎类型分流、
+        # 不看协议名；proxy 取引擎实例自己的 proxy_url（端口可能被构造参数改过）。
+        # OpenVPN 是 TUN/隧道模式，维持现状：用 probe_factory() 造的那一个 probe。
+        engine = engines.get(node.protocol)
+        if isinstance(engine, SingBoxEngine):
+            return verify_exit(node, make_real_probe(proxy=engine.proxy_url))
+        return verify_exit(node, probe)
+
+    return Orchestrator(store, engines, verifier)
 
 
 def cmd_connect(store: Store, args, probe_factory, engine_factory=None) -> int:
@@ -182,6 +233,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--link", action="append", help="单个分享链接（可重复）")
     p.add_argument("--ovpn", action="append", help=".ovpn 文件（可重复）")
 
+    p = sub.add_parser("import-subscription",
+                       help="导入订阅（本地文件或订阅地址，二选一）→ 本地库，节点归手动导入页")
+    p.add_argument("--file", help="本地订阅文件（整段 base64 或明文链接列表）")
+    p.add_argument("--url", help="订阅地址（http/https）")
+    p.add_argument("--name", help="订阅名（可选，写进节点 extra 做溯源）")
+
     p = sub.add_parser("list", help="列出节点（默认按来源分四页输出）")
     p.add_argument("--source", choices=list(SOURCES), help="只看某一页")
     p.add_argument("--scene", choices=list(SCENES), help="页内按场景过滤")
@@ -204,7 +261,7 @@ def build_parser() -> argparse.ArgumentParser:
     return ap
 
 
-def main(argv=None, probe_factory=None, engine_factory=None) -> int:
+def main(argv=None, probe_factory=None, engine_factory=None, fetcher=None) -> int:
     args = build_parser().parse_args(argv)
     if probe_factory is None:
         proxy = getattr(args, "proxy", None)
@@ -213,6 +270,8 @@ def main(argv=None, probe_factory=None, engine_factory=None) -> int:
     try:
         if args.cmd == "intake":
             return cmd_intake(store, args)
+        if args.cmd == "import-subscription":
+            return cmd_import_subscription(store, args, fetcher=fetcher)
         if args.cmd == "list":
             return cmd_list(store, args)
         if args.cmd in ("pin", "ban"):
