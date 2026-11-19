@@ -609,11 +609,11 @@ def merge_history(uniq, history):
 
 def evaluate_stability(node: dict, history_entry: dict = None) -> dict:
     """
-    四场景评级（全部基于实测 + feed 指标 + 历史稳定性，不臆造）:
-      support_ready  ⭐客服稳连: 干净IP + 住宅 + 在线>=12h + 负载<=120 + 抖动<=150 + 延迟<=600
-      game_ready     🎮游戏:     延迟<=400 + 抖动<=100 + 负载<=250（允许短开机，响应优先）
-      speed_ready    ⬇️下载:     feed带宽>=阈值 + 实测可用 + 负载<=250 + 延迟<=5000 + 稳定(波动率<30%)
-      ai_ready       🤖国外AI:   干净IP + 在线>=6h + 抖动<=200 + 延迟<=800
+    四场景评级（全部基于实测 + feed 指标 + 历史稳定性，不臆造；阈值以文件顶部常量为准，可经环境变量覆盖）:
+      support_ready  ⭐客服稳连: 干净IP + 住宅 + 在线>=6h + 负载<=150 + 抖动<=800 + 延迟<=3500
+      game_ready     🎮游戏:     延迟<=4000 + 抖动<=1000 + 负载<=300 +（在线未知或>=1h）+ 出口非脏（允许短开机，响应优先）
+      speed_ready    ⬇️下载:     feed带宽>=2.0Mbps + 负载<=300 + 延迟<=5000 + 稳定(波动率<30%)
+      ai_ready       🤖国外AI:   干净IP + 在线>=3h + 抖动<=800 + 延迟<=3500
     返回 dict，直接 update 进节点。
     """
     uptime_h = node.get("uptime_hours")            # None = 未知
