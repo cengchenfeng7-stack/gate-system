@@ -256,11 +256,74 @@ def verify_exit(node: Node, probe: ProbeFn, stable: bool = False,
 
 
 def apply_outcome(node: Node, outcome: VerifyOutcome) -> Node:
-    """把验证结果写回节点（出口画像 + 指标 + 场景）。失败时不覆盖旧画像。"""
+    """把验证结果写回节点（出口画像 + 指标 + 场景）。失败时不覆盖旧画像。
+    成功时顺带两件 M2.5 的事（用户 2026-11-20 亲定）：
+    ① 按实测出口改名（原名保全进 extra["orig_name"]，只存第一次）；
+    ② 污染节点打隔离标记 / 验干净自动解除（见 _apply_quarantine）。"""
     if outcome.ok and outcome.exit_profile is not None:
         node.exit_profile = outcome.exit_profile
         node.scenes = set(outcome.scenes)
+        _apply_exit_naming(node, outcome.exit_profile)
+        _apply_quarantine(node, outcome.exit_profile)
     return node
+
+
+# ---------------------------------------------------------------------------
+# M2.5：按实测出口改名 + 污染隔离（判定只认实测画像，绝不采信节点自报名字）
+# ---------------------------------------------------------------------------
+COUNTRY_NAMES_ZH = {
+    "JP": "日本", "KR": "韩国", "US": "美国", "NG": "尼日利亚", "HK": "香港",
+    "TW": "台湾", "MO": "澳门", "SG": "新加坡", "GB": "英国", "DE": "德国",
+    "FR": "法国", "NL": "荷兰", "CA": "加拿大", "AU": "澳大利亚", "IN": "印度",
+    "RU": "俄罗斯", "BR": "巴西", "ZA": "南非", "TR": "土耳其", "AE": "阿联酋",
+    "TH": "泰国", "VN": "越南", "MY": "马来西亚", "ID": "印尼", "PH": "菲律宾",
+    "IT": "意大利", "ES": "西班牙", "SE": "瑞典", "CH": "瑞士", "PL": "波兰",
+    "UA": "乌克兰", "IL": "以色列", "EG": "埃及", "KE": "肯尼亚", "AR": "阿根廷",
+    "MX": "墨西哥", "CN": "中国", "NZ": "新西兰", "IE": "爱尔兰", "AT": "奥地利",
+    "BE": "比利时", "DK": "丹麦", "FI": "芬兰", "NO": "挪威", "PT": "葡萄牙",
+    "GR": "希腊", "CZ": "捷克", "RO": "罗马尼亚", "HU": "匈牙利", "CL": "智利",
+    "CO": "哥伦比亚", "PE": "秘鲁", "SA": "沙特阿拉伯", "QA": "卡塔尔",
+    "KW": "科威特", "PK": "巴基斯坦", "BD": "孟加拉国", "LK": "斯里兰卡",
+    "MM": "缅甸", "KH": "柬埔寨", "LA": "老挝",
+}
+
+
+def exit_display_name(profile: ExitProfile) -> str:
+    """实测名格式（用户 2026-11-20 拍板）：「国家中文 · 出口IP · 运营商」；
+    org 缺失省略第三段；国家优先 country_code 映射中文，其次画像自带
+    country 名，再次代码本身——全是实测字段，不猜不编。"""
+    country = (COUNTRY_NAMES_ZH.get(profile.country_code or "")
+               or profile.country or profile.country_code or "未知")
+    parts = [country, profile.ip or "未知IP"]
+    if profile.org:
+        parts.append(profile.org)
+    return " · ".join(str(p) for p in parts)
+
+
+def pollution_of(profile: ExitProfile) -> tuple:
+    """污染判定：is_clean is False 或 dirty 非空。返回 (是否污染, 原因串)。"""
+    reasons = sorted(profile.dirty or set())
+    if profile.is_clean is False and "dirty_ip" not in reasons:
+        reasons.append("dirty_ip")
+    return (bool(reasons), ",".join(reasons))
+
+
+def _apply_exit_naming(node: Node, profile: ExitProfile) -> None:
+    if not profile.ip:
+        return
+    if "orig_name" not in node.extra:
+        node.extra["orig_name"] = node.name
+    node.name = exit_display_name(profile)
+
+
+def _apply_quarantine(node: Node, profile: ExitProfile) -> None:
+    polluted, reason = pollution_of(profile)
+    if polluted:
+        node.extra["quarantined"] = "1"
+        node.extra["quarantine_reason"] = reason
+    else:
+        node.extra.pop("quarantined", None)
+        node.extra.pop("quarantine_reason", None)
 
 
 # ---------------------------------------------------------------------------

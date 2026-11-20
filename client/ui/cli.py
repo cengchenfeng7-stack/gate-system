@@ -52,7 +52,8 @@ def _fmt_node(n) -> str:
     scenes = "/".join(sorted(n.scenes)) or "-"
     lat = f"{n.metrics.latency_ms:.0f}ms" if n.metrics.latency_ms is not None else "?"
     exit_s = ep.ip or "未验"
-    marks = ("📌" if n.pinned else "") + ("🚫" if n.banned else "")
+    marks = ("📌" if n.pinned else "") + ("🚫" if n.banned else "") + \
+            ("☠" if n.extra.get("quarantined") == "1" else "")
     return (f"{n.id}  {n.name}  [{n.protocol}/{n.source}] 出口={exit_s} "
             f"{ep.network_type} 延迟={lat} 场景={scenes} {marks}".rstrip())
 
@@ -120,6 +121,14 @@ def cmd_list(store: Store, args) -> int:
     from ..core.model import SOURCE_LABELS, SOURCES
     nodes = store.list_nodes(scene=args.scene, include_banned=args.all)
     if args.source:
+        nodes = [n for n in nodes if n.source == args.source]
+    # M2.5 污染隔离：默认隐藏隔离节点（数据不删），末尾汇总一行报数
+    hidden = [n for n in nodes if n.extra.get("quarantined") == "1"]
+    if not args.show_quarantined:
+        nodes = [n for n in nodes if n.extra.get("quarantined") != "1"]
+    else:
+        hidden = []
+    if args.source:
         groups = [(args.source, [n for n in nodes if n.source == args.source])]
     else:
         groups = [(src, [n for n in nodes if n.source == src]) for src in SOURCES]
@@ -135,10 +144,12 @@ def cmd_list(store: Store, args) -> int:
         for n in sorted_nodes(store, members):
             print("  " + _fmt_node(n))
         total += len(members)
-    if total == 0:
+    if total == 0 and not hidden:
         print("没有符合条件的节点。先用 intake 导入。")
-    else:
+    elif total > 0:
         print(f"共 {total} 个")
+    if hidden:
+        print(f"（另有 {len(hidden)} 个污染节点已隔离，--show-quarantined 查看）")
     return 0
 
 
@@ -200,6 +211,11 @@ def _build_orchestrator(store: Store, probe_factory, engine_factory=None) -> Orc
 
 
 def cmd_connect(store: Store, args, probe_factory, engine_factory=None) -> int:
+    node = store.get_node(args.node_id)
+    if node is not None and node.extra.get("quarantined") == "1":
+        # 隔离节点被手动点名连接：警告但不阻断（用户点名即视为知情，M2.5 规格）
+        print(f"⚠ 该节点已被标记为污染节点（{node.extra.get('quarantine_reason', '')}），"
+              "仍按你的点名连接。")
     orch = _build_orchestrator(store, probe_factory, engine_factory)
     try:
         ev = orch.connect(args.node_id)
@@ -212,6 +228,21 @@ def cmd_connect(store: Store, args, probe_factory, engine_factory=None) -> int:
         orch.disconnect()
         print("（CLI 单次形态：验证通过后已断开，常驻连接在 M3 提供）")
     return 0 if ev.kind == "connected" else 1
+
+
+def cmd_restore_names(store: Store, args) -> int:
+    """把被实测改名的节点换回原名（extra["orig_name"]），并清除原名标记。
+    隔离标记不动（改名与隔离是两回事）。"""
+    restored = 0
+    for n in store.list_nodes(include_banned=True):
+        orig = n.extra.get("orig_name")
+        if orig:
+            n.name = orig
+            del n.extra["orig_name"]
+            store.upsert_node(n)
+            restored += 1
+    print(f"已恢复 {restored} 个节点的原名")
+    return 0
 
 
 def cmd_status(store: Store, args) -> int:
@@ -245,6 +276,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--source", choices=list(SOURCES), help="只看某一页")
     p.add_argument("--scene", choices=list(SCENES), help="页内按场景过滤")
     p.add_argument("--all", action="store_true", help="包含已拉黑节点")
+    p.add_argument("--show-quarantined", action="store_true",
+                   help="显示已被隔离的污染节点（带 ☠ 标记）")
 
     for flag in ("pin", "ban"):
         p = sub.add_parser(flag, help=f"{'置顶' if flag == 'pin' else '拉黑'}节点（--off 取消）")
@@ -259,6 +292,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("node_id")
 
     sub.add_parser("disconnect", help="断开（CLI 形态下无常驻会话，仅提示）")
+    sub.add_parser("restore-names", help="把按实测出口改名的节点恢复原名")
     sub.add_parser("status", help="查看节点库与会话说明")
     return ap
 
@@ -286,6 +320,8 @@ def main(argv=None, probe_factory=None, engine_factory=None, fetcher=None) -> in
             print("CLI 形态下没有常驻会话可断开（连接在 connect 进程内管理）；"
                   "常驻断开在 M3 托盘提供。")
             return 0
+        if args.cmd == "restore-names":
+            return cmd_restore_names(store, args)
         if args.cmd == "status":
             return cmd_status(store, args)
         return _err(f"未知命令: {args.cmd}")
