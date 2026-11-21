@@ -11,8 +11,10 @@ M2 第一个模块：把订阅内容（分享链接列表，整段 base64 或明
   node.extra（subscription_url / subscription_name）做溯源。
 - 支持的输入：逐行 vless:// ss:// trojan:// sstp:// vmess:// 分享链接；
   空行与 # 注释行跳过；坏行计入 skipped，不中断整批。
-- 暂不支持：sing-box JSON、Clash YAML 等客户端配置格式——喂进来只会
-  得到空列表（不抛异常，也不假装支持），需要时另行专项实现。
+- Clash YAML 配置走 clash_import 直导入（parse_subscription_text 自动
+  识别顶层含 proxies 列表的 YAML 并转交，source_format="clash-yaml"）。
+- 暂不支持：sing-box JSON 等其他客户端配置格式——喂进来只会得到
+  空列表（不抛异常，也不假装支持），需要时另行专项实现。
 - 联网边界：decode_subscription_text / parse_subscription_text /
   load_subscription_file 纯本地，不发任何网络请求；只有
   fetch_subscription_text / import_subscription_url 会拉取订阅地址。
@@ -25,8 +27,11 @@ import binascii
 import re
 import urllib.request
 from dataclasses import dataclass
+
+import yaml
 from urllib.parse import urlsplit
 
+from . import clash_import
 from . import manual
 
 
@@ -71,6 +76,26 @@ def decode_subscription_text(text: str) -> tuple[str, str]:
     return decoded, "base64"
 
 
+def _try_clash_import(text: str, source: str = "manual",
+                      subscription_url: str = "",
+                      subscription_name: str = ""):
+    """文本若是 Clash YAML（顶层 dict 且含 proxies 列表）→ 走 clash_import
+    直导入并包装成 SubscriptionResult；否则返回 None，交回链接行流程。
+    识别只认结构、不认文件名；YAML 解不出或结构不符都不拦截。"""
+    stripped = text[1:] if text.startswith("\ufeff") else text
+    try:
+        doc = yaml.safe_load(stripped)
+    except yaml.YAMLError:
+        return None
+    if not isinstance(doc, dict) or not isinstance(doc.get("proxies"), list):
+        return None
+    res = clash_import.import_clash_text(
+        stripped, source=source, subscription_url=subscription_url,
+        subscription_name=subscription_name)
+    return SubscriptionResult(nodes=res.nodes, skipped=res.skipped,
+                              source_format="clash-yaml")
+
+
 def parse_subscription_text(text: str, source: str = "manual",
                             subscription_url: str = "",
                             subscription_name: str = "") -> SubscriptionResult:
@@ -80,7 +105,13 @@ def parse_subscription_text(text: str, source: str = "manual",
        manual.parse_link(line, source=source)，ValueError → skipped += 1；
     3. subscription_url / subscription_name 非空时，写进每个 node.extra；
     4. 按 node.id 批内去重（先出现者胜，保持原顺序）。
-    纯本地，不发网络请求。sing-box JSON / Clash YAML 暂不支持：结果为空列表。"""
+    纯本地，不发网络请求。Clash YAML 自动转 clash_import 直导入；
+    sing-box JSON 暂不支持：结果为空列表。"""
+    clash = _try_clash_import(text, source=source,
+                              subscription_url=subscription_url,
+                              subscription_name=subscription_name)
+    if clash is not None:
+        return clash
     link_text, source_format = decode_subscription_text(text)
     nodes = []
     skipped = 0

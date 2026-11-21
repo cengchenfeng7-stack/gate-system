@@ -171,3 +171,41 @@ class TestLoadSubscriptionFile(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+CLASH_YAML = """\
+proxies:
+  - name: clash-vless
+    type: vless
+    server: example.com
+    port: 443
+    uuid: 11111111-2222-3333-4444-555555555555
+    tls: true
+  - name: clash-hy2
+    type: hysteria2
+    server: hy2.example.com
+    port: 443
+    password: fake-hy2-pw
+"""
+
+
+class TestClashYamlRoute(unittest.TestCase):
+    """Clash YAML 经 parse_subscription_text 自动转直导入（阶段二）。"""
+
+    def test_clash_yaml_routed(self):
+        res = sub_src.parse_subscription_text(CLASH_YAML)
+        self.assertEqual(res.source_format, "clash-yaml")
+        self.assertEqual(len(res.nodes), 2)
+        self.assertEqual(res.skipped, 0)
+        protos = {n.protocol for n in res.nodes}
+        self.assertEqual(protos, {"vless", "hysteria2"})
+
+    def test_non_clash_yaml_falls_through(self):
+        res = sub_src.parse_subscription_text("foo: bar\n")
+        self.assertEqual(res.source_format, "plain")
+        self.assertEqual(res.nodes, [])
+
+    def test_plain_links_unaffected(self):
+        res = sub_src.parse_subscription_text(THREE_LINKS)
+        self.assertEqual(res.source_format, "plain")
+        self.assertEqual(len(res.nodes), 3)

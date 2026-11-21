@@ -2,6 +2,11 @@
 
 版本号规矩：主版本.次版本.修订。里程碑（M1/M2/M3…）升次版本，缺陷修复与小改进升修订。每次发布在本文件顶部加一段，写明日期与改动要点；代码入库以本文件与 VERSION 为准。
 
+## 0.4.0 - 2026-11-21
+- 阶段二第一段：Clash YAML 直导入（新模块 sources/clash_import.py，ZCode 原型、云曦审查集成）。订阅文件导入自动识别 Clash 配置（顶层含 proxies 列表），七协议（ss/vmess/vless/trojan/hysteria2/tuic/wireguard）逐字段直入 Node，不再绕分享链接：老转换器丢的 ss plugin/plugin-opts、trojan grpc serviceName 与 fp/alpn、vless/vmess 的 alpn/allowInsecure、ws early-data 全部保住；每条原条目另存 extra["clash"] 零丢弃保真。hy2/tuic/wireguard 从「直接跳过」变为可入库（引擎出站未实现，启动时明确报错）。proxy-groups 一律不导入（铁律：无自动切换）。
+- 已知边界：直入的 vmess 节点引擎暂不能启动（引擎 vmess 出站只认链接 JSON，待阶段二引擎侧改 extra 取参）；ss plugin 引擎未实现，字段已保真待引擎补。
+- 离线测试增至 211 个（新增 clash_import 19 + 订阅路由 3）。
+
 ## 0.3.2 - 2026-11-21
 - 延迟显示人性化（用户亲点）：1 秒以内显示毫秒数，超过 1 秒换算为「5.7 秒 / 23 秒」，不再出现 5745ms、23147ms 这种裸数字；验出口成功消息同口径。
 - 新增删除功能（用户亲点）：工具栏「删除」按钮，删前弹确认、正在连接的节点拦截；底层真删节点及其全部测速样本（此前只有拉黑，库只进不出）。
