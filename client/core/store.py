@@ -182,6 +182,19 @@ class Store:
     def set_banned(self, node_id: str, banned: bool = True) -> bool:
         return self._set_flag(node_id, "banned", banned)
 
+    def delete_node(self, node_id: str) -> bool:
+        """真删除：节点行 + 它的全部验证样本一并清掉，返回是否删到了。
+
+        拉黑只是打标记、节点还在库里；没有删除，库只进不出会越攒越脏
+        （2026-11-21 用户亲点要删除功能）。"""
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM nodes WHERE id = ?", (node_id,))
+            self._conn.execute(
+                "DELETE FROM verify_samples WHERE node_id = ?", (node_id,))
+            self._conn.commit()
+            return cur.rowcount > 0
+
     # ---------------- samples ----------------
     def add_sample(self, sample: VerifySample) -> None:
         with self._lock:

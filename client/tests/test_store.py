@@ -107,5 +107,37 @@ class TestStore(unittest.TestCase):
         self.assertEqual(self.store.count_nodes(), 3)
 
 
+class TestDeleteNode(unittest.TestCase):
+    """删除功能（2026-11-21 用户亲点）：节点与它的样本一并删干净，
+    库不再只进不出；删不存在的返回 False；别的节点不受影响。"""
+
+    def setUp(self):
+        self.store = Store(":memory:")
+
+    def tearDown(self):
+        self.store.close()
+
+    def test_delete_removes_node_and_samples(self):
+        self.store.upsert_node(node("a"))
+        self.store.add_sample(VerifySample(
+            node_id="a", kind="verify", success=True, latency_ms=10))
+        self.assertTrue(self.store.delete_node("a"))
+        self.assertIsNone(self.store.get_node("a"))
+        self.assertEqual(self.store.samples_for("a"), [])
+        self.assertEqual(self.store.count_nodes(), 0)
+
+    def test_delete_missing_returns_false(self):
+        self.assertFalse(self.store.delete_node("ghost"))
+
+    def test_delete_leaves_other_nodes(self):
+        self.store.upsert_node(node("a"))
+        self.store.upsert_node(node("b"))
+        self.store.add_sample(VerifySample(
+            node_id="b", kind="verify", success=True, latency_ms=10))
+        self.assertTrue(self.store.delete_node("a"))
+        self.assertIsNotNone(self.store.get_node("b"))
+        self.assertEqual(len(self.store.samples_for("b")), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

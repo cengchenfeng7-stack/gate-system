@@ -86,6 +86,21 @@ def compute_stats(samples) -> NodeStats:
     )
 
 
+def format_latency_ms(ms: Optional[float]) -> str:
+    """延迟毫秒数 → 人能一眼读懂的显示（界面「延迟」列专用）。
+
+    原始毫秒直接摆出来会出现 5745ms、23147ms 这种没法读的数：
+    小于 1 秒显示毫秒，1 秒以上换算成秒（<10 秒带一位小数，再大取整）。
+    """
+    if ms is None:
+        return "—"
+    if ms < 1000:
+        return f"{ms:.0f}ms"
+    if ms < 10000:
+        return f"{ms / 1000:.1f} 秒"
+    return f"{ms / 1000:.0f} 秒"
+
+
 def stats_for(store: Store, node_id: str) -> NodeStats:
     return compute_stats(store.samples_for(node_id))
 

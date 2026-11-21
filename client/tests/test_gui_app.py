@@ -499,5 +499,38 @@ class TestLastNodeMemory(unittest.TestCase):
         self.assertIsNone(win.pages["manual"].selected_node_id())
 
 
+@unittest.skipUnless(_QT, "需要 PySide6")
+class TestDeleteNodeGui(unittest.TestCase):
+    """删除按钮背后的动作（2026-11-21 用户亲点）：删节点并刷新，
+    删不存在的返回 False 不报错。对话框确认不在此测（delete_node_by_id
+    与确认已分离）。"""
+
+    def setUp(self):
+        self.app = QApplication.instance() or QApplication([])
+
+    def _window(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(d, ignore_errors=True))
+        store = Store(os.path.join(d, "test.db"))
+        seed(store)
+        eng = FakeEngine()
+        orch = Orchestrator(store, {"openvpn": eng}, ok_verifier)
+        win = app_mod.MainWindow(store, orchestrator=orch,
+                                 engines={"openvpn": eng})
+        self.addCleanup(win.close)
+        return win
+
+    def test_delete_node_by_id(self):
+        win = self._window()
+        self.assertIsNotNone(win.store.get_node("m1"))
+        self.assertTrue(win.delete_node_by_id("m1"))
+        self.assertIsNone(win.store.get_node("m1"))
+        self.assertIsNone(win.pages["manual"].selected_node_id())
+
+    def test_delete_missing_node_returns_false(self):
+        win = self._window()
+        self.assertFalse(win.delete_node_by_id("ghost"))
+
+
 if __name__ == "__main__":
     unittest.main()

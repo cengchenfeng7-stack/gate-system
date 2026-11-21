@@ -113,5 +113,24 @@ class TestSortAndRecord(unittest.TestCase):
         store.close()
 
 
+class TestFormatLatency(unittest.TestCase):
+    """延迟显示必须人能一眼读懂：不许再出现 5745ms / 23147ms 这种裸毫秒数。"""
+
+    def test_none_is_dash(self):
+        self.assertEqual(history.format_latency_ms(None), "—")
+
+    def test_sub_second_shows_ms(self):
+        self.assertEqual(history.format_latency_ms(276.4), "276ms")
+        self.assertEqual(history.format_latency_ms(999.0), "999ms")
+
+    def test_seconds_one_decimal(self):
+        self.assertEqual(history.format_latency_ms(1000.0), "1.0 秒")
+        self.assertEqual(history.format_latency_ms(5745.0), "5.7 秒")
+
+    def test_large_seconds_rounded(self):
+        self.assertEqual(history.format_latency_ms(23147.0), "23 秒")
+        self.assertEqual(history.format_latency_ms(99999.0), "100 秒")
+
+
 if __name__ == "__main__":
     unittest.main()

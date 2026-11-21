@@ -276,8 +276,7 @@ if _QT_OK:
                 else:
                     clean_s = "未知"
                 stats = history.stats_for(self.window.store, n.id)
-                lat = stats.median_latency_ms
-                lat_s = f"{lat:.0f}ms" if lat is not None else "—"
+                lat_s = history.format_latency_ms(stats.median_latency_ms)
                 if stats.total == 0:
                     stab_s = "无样本"
                 else:
@@ -382,6 +381,9 @@ if _QT_OK:
             self.ban_btn = QPushButton("拉黑/取消")
             self.ban_btn.clicked.connect(self.toggle_ban)
             actions.addWidget(self.ban_btn)
+            self.delete_btn = QPushButton("删除")
+            self.delete_btn.clicked.connect(self.delete_selected)
+            actions.addWidget(self.delete_btn)
             actions.addStretch(1)
             # 自动探测开关 + 间隔（2026-11-21 需求：后台定时测延迟，
             # 能用的节点一直排在前面）。设置经 QSettings 持久化。
@@ -656,7 +658,7 @@ if _QT_OK:
                            latency_ms=outcome.latency_ms,
                            exit_ip=node.exit_profile.ip, detail="验出口通过")
             ep = node.exit_profile
-            lat = (f"，延迟 {outcome.latency_ms:.0f}ms"
+            lat = (f"，延迟 {history.format_latency_ms(outcome.latency_ms)}"
                    if outcome.latency_ms is not None else "")
             return ("verify_ok",
                     f"出口 {ep.ip} / {ep.country}({ep.country_code}) / "
@@ -780,6 +782,28 @@ if _QT_OK:
             if node is not None:
                 self.store.set_banned(node.id, not node.banned)
                 self.refresh_pages()
+
+        def delete_selected(self):
+            """删除选中节点：连接中的先拦，删前弹确认（删了恢复不了）。"""
+            node = self.selected_node()
+            if node is None:
+                return
+            if self.orchestrator.active_node_id == node.id:
+                self._show_alert("这个节点正在连接中，先断开再删")
+                return
+            ok = QMessageBox.question(
+                self, "删除节点",
+                f"确定删除「{node.name}」？\n连同它的测速记录一起删，删了恢复不了。")
+            if ok != QMessageBox.Yes:
+                return
+            self.delete_node_by_id(node.id)
+
+        def delete_node_by_id(self, node_id: str) -> bool:
+            """删除节点并刷新界面（与确认对话框分离，便于离线测试）。"""
+            gone = self.store.delete_node(node_id)
+            if gone:
+                self.refresh_pages()
+            return gone
 
         def poll_once(self):
             """巡检：掉线由 orchestrator.poll 上报 dropped 事件，绝不自动切换。"""
