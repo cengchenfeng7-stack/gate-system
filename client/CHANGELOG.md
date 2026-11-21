@@ -2,6 +2,11 @@
 
 版本号规矩：主版本.次版本.修订。里程碑（M1/M2/M3…）升次版本，缺陷修复与小改进升修订。每次发布在本文件顶部加一段，写明日期与改动要点；代码入库以本文件与 VERSION 为准。
 
+## 0.5.0 - 2026-11-21
+- 阶段二第二段：订阅格式统一识别导入（新模块 sources/format_import.py，ZCode 原型、云曦审查集成）。订阅导入（文件与地址）现走统一入口：b64 整段、明文链接列表、txt 文件、Clash YAML 四格式自动识别；修掉旧启发式的三个实测失败模式——b64 与明文混排不再整块丢失（两组分开解、合并去重）、注释头不再挡住 base64 识别、`$` 开头的行不再被整行跳过。识别不了的内容现在明确报错（「无法识别导入内容」），不再静默返回 0 节点。
+- 已知边界：纯字母数字短行可能被标成 mixed（不影响导入正确性）；多段 b64 被乱码行隔开时不逐段恢复；流程式（JSON 风格）YAML 不认作 Clash；vmess:// 链接的 base64 JSON 载荷仍不解析（直导入 Clash YAML 可绕开）。
+- 离线测试增至 243 个（新增 format_import 31 + CLI 混合导入 1；另更新 1 个旧测试口径：垃圾文件现为显式报错）。
+
 ## 0.4.0 - 2026-11-21
 - 阶段二第一段：Clash YAML 直导入（新模块 sources/clash_import.py，ZCode 原型、云曦审查集成）。订阅文件导入自动识别 Clash 配置（顶层含 proxies 列表），七协议（ss/vmess/vless/trojan/hysteria2/tuic/wireguard）逐字段直入 Node，不再绕分享链接：老转换器丢的 ss plugin/plugin-opts、trojan grpc serviceName 与 fp/alpn、vless/vmess 的 alpn/allowInsecure、ws early-data 全部保住；每条原条目另存 extra["clash"] 零丢弃保真。hy2/tuic/wireguard 从「直接跳过」变为可入库（引擎出站未实现，启动时明确报错）。proxy-groups 一律不导入（铁律：无自动切换）。
 - 已知边界：直入的 vmess 节点引擎暂不能启动（引擎 vmess 出站只认链接 JSON，待阶段二引擎侧改 extra 取参）；ss plugin 引擎未实现，字段已保真待引擎补。

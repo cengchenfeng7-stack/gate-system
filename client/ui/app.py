@@ -37,6 +37,7 @@ from ..core.verify import apply_outcome, make_real_probe, verify_exit
 from ..engines.base import EngineError
 from ..engines.singbox_engine import SINGBOX_PROTOCOLS, SingBoxEngine
 from ..sources import feed as feed_src
+from ..sources import format_import as format_src
 from ..sources import manual as manual_src
 from ..sources import pipeline as pipeline_src
 from ..sources import subscription as subscription_src
@@ -877,7 +878,7 @@ if _QT_OK:
             elif tag == "import_url" and ok:
                 self._intake_done(
                     payload.nodes,
-                    f"订阅导入（格式 {payload.source_format}，跳过坏行 {payload.skipped}）")
+                    f"订阅导入（格式 {payload.format}，跳过坏行 {payload.skipped}）")
             self.refresh_pages()
             self._update_action_states()
 
@@ -967,9 +968,9 @@ if _QT_OK:
         def import_subscription_file(self):
             for path in self._pick_files("选择订阅文件", "订阅文件 (*.txt *.yaml *.yml *.json)"):
                 try:
-                    res = subscription_src.load_subscription_file(path)
+                    res = format_src.import_any_file(path)
                     self._intake_done(res.nodes,
-                                      f"订阅导入（格式 {res.source_format}，跳过坏行 {res.skipped}）")
+                                      f"订阅导入（格式 {res.format}，跳过坏行 {res.skipped}）")
                 except (ValueError, RuntimeError, OSError) as exc:
                     self._show_alert(f"导入失败：{exc}")
 
@@ -979,7 +980,9 @@ if _QT_OK:
                 return
             # 地址只在内存里用，不回显、不落日志（同 CLI 红线）
             self._run_task("import_url",
-                           lambda: subscription_src.import_subscription_url(url.strip()))
+                           lambda: format_src.import_any_text(
+                               subscription_src.fetch_subscription_text(url.strip()),
+                               subscription_url=url.strip()))
 
     def main(argv=None) -> int:
         parser = argparse.ArgumentParser(prog="gate-client-gui",

@@ -114,3 +114,37 @@ class TestCli(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestImportSubscriptionUnifiedEntry(unittest.TestCase):
+    """订阅导入统一入口（阶段二 task2）：CLI --file 走 format_import。
+
+    混合输入（注释头 + 整段 b64 + 一条明文链接）应完整收纳，不丢整块。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db = os.path.join(self.tmp.name, "client.db")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_mixed_file_imports_both_branches(self):
+        import base64
+        plain = ("vless://11111111-2222-3333-4444-555555555555"
+                 "@a.example.com:443?security=tls#mixed-plain")
+        blob = base64.b64encode(
+            ("trojan://fake-pw@c.example.com:443#mixed-b64\n"
+             ).encode("utf-8")).decode("ascii")
+        path = os.path.join(self.tmp.name, "mixed.txt")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("# 注释头\n" + blob + "\n" + plain + "\n")
+        rc, out, _ = run_cli(["--db", self.db, "import-subscription",
+                              "--file", path])
+        self.assertEqual(rc, 0)
+        self.assertIn("已收纳 2 个节点", out)
+        self.assertIn("格式 mixed", out)
+        rc, out, _ = run_cli(["--db", self.db, "list"])
+        self.assertIn("mixed-plain", out)
+        self.assertIn("mixed-b64", out)
+

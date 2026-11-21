@@ -100,12 +100,14 @@ class TestCliImportSubscription(unittest.TestCase):
         self.assertIn("boom", err)
         self.assertEqual(len(self._db_nodes()), 0)
 
-    # 5. --file 纯垃圾文本 → rc==2，库空
+    # 5. --file 纯垃圾文本 → rc==2，库空（阶段二 task2：识别不了显式报错，
+    # 不再是旧的「没有解析出任何节点」静默空结果口径）
     def test_file_garbage_returns_2(self):
         path = self._write_sub_file("完全不是链接的垃圾文本\n随便写的第二行\n")
         rc, _out, err = self._import("--file", path)
         self.assertEqual(rc, 2)
-        self.assertIn("没有解析出任何节点", err)
+        self.assertIn("导入失败", err)
+        self.assertIn("无法识别", err)
         self.assertEqual(len(self._db_nodes()), 0)
 
     # 6. --file 路径不存在 → rc==2

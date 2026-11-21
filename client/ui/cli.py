@@ -33,6 +33,7 @@ from ..core.verify import apply_outcome, make_real_probe, verify_exit
 from ..engines.openvpn_engine import OpenVPNEngine
 from ..engines.singbox_engine import SINGBOX_PROTOCOLS, SingBoxEngine
 from ..sources import feed as feed_src
+from ..sources import format_import as format_src
 from ..sources import manual as manual_src
 from ..sources import pipeline as pipeline_src
 from ..sources import subscription as subscription_src
@@ -94,11 +95,11 @@ def cmd_import_subscription(store: Store, args, fetcher=None) -> int:
     subscription_name = args.name or ""
     try:
         if args.file:
-            res = subscription_src.load_subscription_file(
+            res = format_src.import_any_file(
                 args.file, subscription_name=subscription_name)
         else:
             text = fetcher(args.url)
-            res = subscription_src.parse_subscription_text(
+            res = format_src.import_any_text(
                 text, subscription_url=args.url, subscription_name=subscription_name)
     except FileNotFoundError as exc:
         return _err(f"文件不存在: {exc.filename}")
@@ -108,10 +109,10 @@ def cmd_import_subscription(store: Store, args, fetcher=None) -> int:
         return _err(f"拉取订阅失败: {exc}")
     if not res.nodes:
         return _err("没有解析出任何节点（检查订阅内容或格式；"
-                    "sing-box JSON / Clash YAML 暂不支持）")
+                    "sing-box JSON 暂不支持）")
     store.upsert_nodes(res.nodes)
     print(f"已收纳 {len(res.nodes)} 个节点（跳过坏行 {res.skipped}，"
-          f"格式 {res.source_format}，库内共 {store.count_nodes()} 个）")
+          f"格式 {res.format}，库内共 {store.count_nodes()} 个）")
     return 0
 
 
