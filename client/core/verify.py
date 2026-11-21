@@ -216,6 +216,8 @@ class VerifyOutcome:
     exit_profile: Optional[ExitProfile] = None
     scenes: set = field(default_factory=set)
     muse_ok: Optional[bool] = None
+    latency_ms: Optional[float] = None     # probe 实测延迟（原先只喂场景
+    jitter_ms: Optional[float] = None      # 评估、不落库，界面延迟列永远空）
 
 
 def verify_exit(node: Node, probe: ProbeFn, stable: bool = False,
@@ -252,7 +254,9 @@ def verify_exit(node: Node, probe: ProbeFn, stable: bool = False,
         jitter_ms=r.jitter_ms if r.jitter_ms is not None else node.metrics.jitter_ms,
         latency_ms=r.latency_ms if r.latency_ms is not None else node.metrics.latency_ms,
         speed_mbps=node.metrics.speed_mbps, stable=stable))
-    return VerifyOutcome(ok=True, exit_profile=profile, scenes=scenes, muse_ok=muse_ok)
+    return VerifyOutcome(ok=True, exit_profile=profile, scenes=scenes,
+                         muse_ok=muse_ok,
+                         latency_ms=r.latency_ms, jitter_ms=r.jitter_ms)
 
 
 def apply_outcome(node: Node, outcome: VerifyOutcome) -> Node:
@@ -263,6 +267,10 @@ def apply_outcome(node: Node, outcome: VerifyOutcome) -> Node:
     if outcome.ok and outcome.exit_profile is not None:
         node.exit_profile = outcome.exit_profile
         node.scenes = set(outcome.scenes)
+        if outcome.latency_ms is not None:
+            node.metrics.latency_ms = outcome.latency_ms
+        if outcome.jitter_ms is not None:
+            node.metrics.jitter_ms = outcome.jitter_ms
         _apply_exit_naming(node, outcome.exit_profile)
         _apply_quarantine(node, outcome.exit_profile)
     return node

@@ -19,10 +19,12 @@ tag=node-out，route.final 指向它），绝不生成 urltest / selector。
 
 from __future__ import annotations
 
+import atexit
 import base64
 import json
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import tempfile
@@ -33,13 +35,17 @@ from typing import Optional
 from ..core.model import Node
 from .base import EngineError, EngineEvent
 
-DEFAULT_SOCKS_PORT = 10808
-DEFAULT_HTTP_PORT = 10809
+DEFAULT_SOCKS_PORT = 7898
+DEFAULT_HTTP_PORT = 7897
 SINGBOX_PROTOCOLS = ("vless", "ss", "trojan", "vmess")
 
 _ENV_BIN = "GATE_CLIENT_SINGBOX_BIN"
 _HOME_BIN = "~/.local/bin/sing-box"
+_ENV_LX_BIN = "GATE_CLIENT_SINGBOX_LX_BIN"
+_HOME_LX_BIN = "~/.local/bin/sing-box-lx"
 _OUT_TAG = "node-out"
+_TEMP_PREFIX = "gate-singbox-"
+_ENGINE_META = "engine.json"
 
 
 @dataclass
@@ -56,13 +62,17 @@ class SingBoxEngine:
     def __init__(self, binary: Optional[str] = None,
                  socks_port: int = DEFAULT_SOCKS_PORT,
                  http_port: int = DEFAULT_HTTP_PORT,
-                 ready_timeout: float = 15.0, popen_factory=None):
+                 ready_timeout: float = 15.0, popen_factory=None,
+                 lx_binary: Optional[str] = None):
         # 构造器不碰文件系统、不找二进制——二进制解析懒到 find_binary/start
         self._binary = binary
+        self._lx_binary = lx_binary
         self.socks_port = int(socks_port)
         self.http_port = int(http_port)
         self.ready_timeout = float(ready_timeout)
         self._popen = popen_factory or subprocess.Popen
+        self._live_handles = []
+        atexit.register(self._stop_all_live)
 
     # ---------------- 二进制解析 ----------------
     def find_binary(self) -> str:
@@ -159,8 +169,10 @@ class SingBoxEngine:
         if not port:
             raise EngineError(f"{label} 节点缺端口")
 
+    _XHTTP_MODES = ("auto", "packet-up", "stream-up", "stream-one")
+
     @staticmethod
-    def _transport(qtype, host, path, service, label: str):
+    def _transport(qtype, host, path, service, label: str, mode=None):
         """vless query / vmess JSON 字段 → (sing-box transport 或 None, host 参数)。
 
         host 参数返回给调用方做 tls server_name 回退；tcp/缺省 → 不写 transport。
@@ -182,6 +194,16 @@ class SingBoxEngine:
         if qtype == "grpc":
             return {"type": "grpc",
                     "service_name": str(service or "").strip()}, host
+        if qtype == "xhttp":
+            # XHTTP（Xray splithttp）：host 是顶层字段（不是 Host 头），
+            # mode 只收四种合法值，非法/缺省就不写、让内核用 auto。
+            t = {"type": "xhttp", "path": str(path or "").strip() or "/"}
+            if host:
+                t["host"] = host
+            m = str(mode or "").strip().lower()
+            if m in SingBoxEngine._XHTTP_MODES:
+                t["mode"] = m
+            return t, host
         raise EngineError(f"{label} 节点暂不支持传输类型 {qtype}")
 
     @staticmethod
@@ -218,7 +240,7 @@ class SingBoxEngine:
         transport, transport_host = self._transport(
             qtype=query.get("type"), host=query.get("host"),
             path=query.get("path"), service=query.get("serviceName"),
-            label="vless")
+            label="vless", mode=query.get("mode"))
         if transport:
             out["transport"] = transport
         tls = self._vless_tls(query, transport_host, node.host)
@@ -269,7 +291,7 @@ class SingBoxEngine:
         transport, transport_host = self._transport(
             qtype=fields.get("net"), host=fields.get("host"),
             path=fields.get("path"), service=fields.get("path"),
-            label="vmess")
+            label="vmess", mode=fields.get("mode"))
         if transport:
             out["transport"] = transport
         if str(fields.get("tls") or "").strip().lower() == "tls":
@@ -313,18 +335,43 @@ class SingBoxEngine:
         不会 SOCKS5，所以探针走这条；流量仍经同一个 node-out 出站。"""
         return f"http://127.0.0.1:{self.http_port}"
 
+    def find_lx_binary(self) -> str:
+        """xhttp 专用第二内核（sing-box-lx，Leadaxe fork，带 with_xhttp）：
+        构造参数 lx_binary → 环境变量 GATE_CLIENT_SINGBOX_LX_BIN →
+        ~/.local/bin/sing-box-lx → shutil.which("sing-box-lx")。
+        显式路径不存在 → 判未找到、不回落（同主内核口径）。找不到返回 ""。"""
+        if self._lx_binary:
+            return self._lx_binary if os.path.isfile(self._lx_binary) else ""
+        env_bin = os.environ.get(_ENV_LX_BIN) or ""
+        if env_bin:
+            return env_bin if os.path.isfile(env_bin) else ""
+        home_bin = os.path.expanduser(_HOME_LX_BIN)
+        if os.path.isfile(home_bin):
+            return home_bin
+        return shutil.which("sing-box-lx") or ""
+
     def start(self, node: Node, on_event=None):
-        binary = self.find_binary()
-        if not binary:
-            explicit = self._binary or os.environ.get(_ENV_BIN) or ""
-            raise self._missing_binary_error(explicit)
         try:
             config = self.build_config(node)
         except EngineError:
             raise
         except Exception as exc:
             raise EngineError(f"sing-box 配置生成失败: {exc}") from exc
+        binary = self.find_binary()
+        transport = (config.get("outbounds") or [{}])[0].get("transport") or {}
+        if transport.get("type") == "xhttp":
+            lx = self.find_lx_binary()
+            if lx:
+                binary = lx          # xhttp 只走第二内核，主内核保持官方版
+        if not binary:
+            explicit = self._binary or os.environ.get(_ENV_BIN) or ""
+            raise self._missing_binary_error(explicit)
 
+        # 启动前先清扫孤儿引擎（兜底，失败绝不影响本次启动）
+        try:
+            self.reap_stale_engines()
+        except Exception:
+            pass
         config_dir = tempfile.mkdtemp(prefix="gate-singbox-")
         config_path = os.path.join(config_dir, "config.json")
         log_path = os.path.join(config_dir, "sing-box.log")
@@ -332,6 +379,9 @@ class SingBoxEngine:
         try:
             with open(config_path, "w", encoding="utf-8") as f:
                 json.dump(config, f, ensure_ascii=False, indent=2)
+            transport = (config.get("outbounds") or [{}])[0].get("transport") or {}
+            if transport.get("type") == "xhttp":
+                self._check_xhttp_capable(binary, config_path, config_dir)
             # stdout/stderr 落日志文件而非 PIPE（长跑会堵满管道），失败还能拿尾巴
             log_file = open(log_path, "wb")
             proc = self._popen([binary, "run", "-c", config_path],
@@ -346,6 +396,8 @@ class SingBoxEngine:
 
         handle = _Handle(node_id=node.id, proc=proc,
                          config_dir=config_dir, log_path=log_path)
+        self._live_handles.append(handle)
+        self._write_engine_meta(handle)
 
         # 就绪等待：每 0.1 秒试连本地 socks 端口（单次 0.3s 超时），
         # 每轮顺带 poll——进程早退=失败；超时=失败（顺带停掉还活着的进程）
@@ -371,9 +423,33 @@ class SingBoxEngine:
                 pass                               # 回调异常不能弄丢已就绪的隧道
         return handle
 
+    @staticmethod
+    def _check_xhttp_capable(binary: str, config_path: str, config_dir: str) -> None:
+        """xhttp 先验：官方 sing-box（v1.14.4 真机实测）根本不认这种传输，
+        run 起来只会立刻 FATAL 退出、报错难懂。先跑一次 check 把话说清：
+        内核不支持就明说——配置没问题，是内核缺这块。check 本身跑不起来
+        （超时/异常）则不拦，交给后面的 run 路径按老规矩报错。"""
+        try:
+            r = subprocess.run([binary, "check", "-c", config_path],
+                               capture_output=True, text=True, timeout=15)
+        except (OSError, subprocess.SubprocessError):
+            return
+        if r.returncode == 0:
+            return
+        out = ((r.stdout or "") + (r.stderr or "")).strip()
+        shutil.rmtree(config_dir, ignore_errors=True)
+        if "unknown transport type" in out and "xhttp" in out:
+            raise EngineError(
+                f"当前内核不支持 xhttp 传输（{binary} 的 check 报 "
+                "unknown transport type: xhttp）——官方 sing-box v1.14.4 "
+                "实测不带 xhttp；把 sing-box-lx 放到 ~/.local/bin/sing-box-lx "
+                "后 xhttp 节点会自动改用它，节点配置本身没问题")
+        raise EngineError(f"sing-box 配置校验未通过: {out[:300]}")
+
     def _fail_start(self, handle: _Handle, reason: str) -> None:
         """启动失败收尾：读日志尾巴 → 停进程 → 删临时目录（含 uuid/密码的配置）
         → 带尾巴抛错。尾巴必须先读——目录马上就删了。"""
+        self._untrack(handle)
         tail = self._log_tail(handle.log_path)
         self._terminate(handle.proc)
         shutil.rmtree(handle.config_dir, ignore_errors=True)
@@ -394,6 +470,7 @@ class SingBoxEngine:
     def stop(self, handle) -> None:
         if handle is None:
             return
+        self._untrack(handle)
         proc = getattr(handle, "proc", None)
         if proc is not None:
             self._terminate(proc)
@@ -401,6 +478,164 @@ class SingBoxEngine:
         if config_dir:
             shutil.rmtree(config_dir, ignore_errors=True)
             handle.config_dir = ""
+
+    # ---------------- 生命周期兜底（孤儿引擎清扫） ----------------
+    # 背景（2026-11-21 真机）：探测引擎的所有者进程异常消失后，stop()
+    # 无人调用，sing-box 子进程被 init 收养、残留一下午（占着 10818）。
+    # 三层兜底：①实例登记 live 句柄 + atexit 退出必停；②每次 start 前
+    # 清扫孤儿；③引擎目录里写 engine.json 登记所有者，供跨进程识别。
+
+    def _write_engine_meta(self, handle) -> None:
+        """把所有者/进程信息写进引擎自己的临时目录。写失败绝不影响
+        启动——清扫只是兜底，不是主流程。"""
+        try:
+            meta = {
+                "owner_pid": os.getpid(),
+                "proc_pid": getattr(handle.proc, "pid", None),
+                "socks_port": self.socks_port,
+                "http_port": self.http_port,
+                "started_at": time.time(),
+            }
+            with open(os.path.join(handle.config_dir, _ENGINE_META),
+                      "w", encoding="utf-8") as f:
+                json.dump(meta, f)
+        except Exception:
+            pass
+
+    def _untrack(self, handle) -> None:
+        self._live_handles = [h for h in self._live_handles
+                              if h is not handle]
+
+    def _stop_all_live(self) -> None:
+        """atexit 兜底：本实例还没停的引擎全部停掉。"""
+        for handle in list(self._live_handles):
+            try:
+                self.stop(handle)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _pid_alive(pid) -> bool:
+        if not pid:
+            return False
+        try:
+            pid = int(pid)
+        except (TypeError, ValueError):
+            return False
+        try:
+            os.kill(pid, 0)
+        except PermissionError:
+            return True
+        except OSError:
+            return False
+        try:  # 僵尸已死、只是还没被收尸，别当活人
+            with open(f"/proc/{pid}/stat", "r", encoding="utf-8") as f:
+                if f.read().rsplit(")", 1)[1].split()[0] == "Z":
+                    return False
+        except (OSError, IndexError):
+            pass
+        return True
+
+    @staticmethod
+    def _pid_ppid(pid):
+        try:
+            with open(f"/proc/{int(pid)}/stat", "r", encoding="utf-8") as f:
+                return int(f.read().rsplit(")", 1)[1].split()[1])
+        except (OSError, ValueError, IndexError):
+            return None
+
+    @staticmethod
+    def _find_pid_by_config(config_dir: str):
+        """无登记的老引擎：按 config.json 路径反查还活着的进程。"""
+        target = os.path.join(config_dir, "config.json")
+        try:
+            entries = os.listdir("/proc")
+        except OSError:
+            return None
+        for entry in entries:
+            if not entry.isdigit():
+                continue
+            try:
+                with open(f"/proc/{entry}/cmdline", "rb") as f:
+                    if target.encode() in f.read().split(b"\0"):
+                        return int(entry)
+            except OSError:
+                continue
+        return None
+
+    @staticmethod
+    def _kill_pid(pid) -> None:
+        """给非子进程的孤儿发 SIGTERM，短暂等待，还活着就 SIGKILL。"""
+        try:
+            os.kill(int(pid), signal.SIGTERM)
+        except (OSError, ValueError):
+            return
+        for _ in range(20):
+            if not SingBoxEngine._pid_alive(pid):
+                return
+            time.sleep(0.1)
+        try:
+            os.kill(int(pid), signal.SIGKILL)
+        except (OSError, ValueError):
+            pass
+
+    @classmethod
+    def reap_stale_engines(cls, root: str = None) -> int:
+        """清扫孤儿引擎，返回清扫数量。所有者还活着的一律不碰；
+        清扫自身出错不外抛。判定孤儿的条件（任一）：
+        ①有 engine.json 且登记的所有者进程已死；
+        ②无登记（旧版本）：进程已被 init 收养（ppid==1）且目录
+          超过 1 小时，或进程已不存在且目录超过 24 小时（纯垃圾
+          目录，内含配置残留，一并删掉）。"""
+        root = root or tempfile.gettempdir()
+        reaped = 0
+        try:
+            names = os.listdir(root)
+        except OSError:
+            return 0
+        for name in names:
+            if not name.startswith(_TEMP_PREFIX):
+                continue
+            config_dir = os.path.join(root, name)
+            if not os.path.isdir(config_dir):
+                continue
+            try:
+                if cls._reap_one(config_dir):
+                    reaped += 1
+            except Exception:
+                continue
+        return reaped
+
+    @classmethod
+    def _reap_one(cls, config_dir: str) -> bool:
+        meta = {}
+        try:
+            with open(os.path.join(config_dir, _ENGINE_META),
+                      "r", encoding="utf-8") as f:
+                meta = json.load(f)
+        except (OSError, ValueError):
+            meta = {}
+        owner_pid = meta.get("owner_pid")
+        proc_pid = meta.get("proc_pid")
+        if owner_pid:
+            if cls._pid_alive(owner_pid):
+                return False            # 所有者活着，不是孤儿
+        else:
+            if not proc_pid:
+                proc_pid = cls._find_pid_by_config(config_dir)
+            try:
+                age = time.time() - os.path.getmtime(config_dir)
+            except OSError:
+                return False
+            if proc_pid and cls._pid_alive(proc_pid):
+                if cls._pid_ppid(proc_pid) != 1 or age < 3600:
+                    return False        # 还挂在活进程树上，或还太新
+            elif age < 86400:
+                return False            # 进程已不在，但目录还不够老
+        if proc_pid and cls._pid_alive(proc_pid):
+            cls._kill_pid(proc_pid)
+        shutil.rmtree(config_dir, ignore_errors=True)
+        return True
 
     def _terminate(self, proc) -> None:
         """terminate → wait 5 秒 → 还活着就 kill → wait。进程已死则直接返回。"""

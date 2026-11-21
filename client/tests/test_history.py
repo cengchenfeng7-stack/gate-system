@@ -26,6 +26,7 @@ class TestStats(unittest.TestCase):
         self.assertEqual(st.success_rate, 0.0)
         self.assertIsNone(st.median_latency_ms)
         self.assertFalse(st.stable)
+        self.assertIsNone(st.last_ok)
 
     def test_success_rate_and_median(self):
         samples = [sample(True, 100, T0), sample(True, 200, T0), sample(False, None, T0)]
@@ -61,6 +62,16 @@ class TestSortAndRecord(unittest.TestCase):
         self.assertEqual(st.success_count, 2)
         store.close()
 
+    def test_last_result(self):
+        store = Store(":memory:")
+        self.assertIsNone(history.last_result(store, "n1"))
+        history.record(store, "n1", "verify", False, ts=T0)
+        history.record(store, "n1", "disconnect", True, ts=T0 + 1)  # 不算测速结果
+        self.assertEqual(history.last_result(store, "n1"), (False, T0))
+        history.record(store, "n1", "connect", True, ts=T0 + 2)
+        self.assertEqual(history.last_result(store, "n1"), (True, T0 + 2))
+        store.close()
+
     def test_sort_prefers_pinned_then_reliable(self):
         store = Store(":memory:")
         a = Node(id="a", name="a", protocol="sstp", source="pipeline")
@@ -71,6 +82,34 @@ class TestSortAndRecord(unittest.TestCase):
                 history.record(store, nid, "verify", True, latency_ms=lat, ts=T0 + i)
         ordered = history.sorted_nodes(store, [a, b, c])
         self.assertEqual([n.id for n in ordered], ["c", "b", "a"])  # pin 第一，其次低延迟
+        store.close()
+
+    def test_last_ok_tracks_latest_link_sample(self):
+        """last_ok 只看最近一条 connect/verify：disconnect 是用户主动断开，
+        不代表链路能用；drop 是巡检告警，也不算。"""
+        store = Store(":memory:")
+        history.record(store, "n1", "verify", True, latency_ms=120, ts=T0)
+        self.assertIs(history.stats_for(store, "n1").last_ok, True)
+        history.record(store, "n1", "verify", False, ts=T0 + 1)
+        self.assertIs(history.stats_for(store, "n1").last_ok, False)
+        # 主动断开（success=True）不许把 last_ok 翻回 True
+        history.record(store, "n1", "disconnect", True, ts=T0 + 2)
+        self.assertIs(history.stats_for(store, "n1").last_ok, False)
+        store.close()
+
+    def test_sort_recent_ok_before_untested_before_dead(self):
+        """排序新口径（2026-11-21 需求：能用的节点一直放前面）：
+        最近成功 > 从未测过 > 最近失败；曾经全通但刚挂的沉底。"""
+        store = Store(":memory:")
+        ok1 = Node(id="ok1", name="ok节点", protocol="sstp", source="pipeline")
+        fresh = Node(id="fresh1", name="没测过", protocol="sstp", source="pipeline")
+        dead = Node(id="dead1", name="死节点", protocol="sstp", source="pipeline")
+        history.record(store, "ok1", "verify", True, latency_ms=900, ts=T0 + 10)
+        # dead 曾经秒通（延迟 50ms 优于 ok1），但最近一次挂了——必须排后面
+        history.record(store, "dead1", "verify", True, latency_ms=50, ts=T0)
+        history.record(store, "dead1", "verify", False, ts=T0 + 5)
+        ordered = history.sorted_nodes(store, [dead, fresh, ok1])
+        self.assertEqual([n.id for n in ordered], ["ok1", "fresh1", "dead1"])
         store.close()
 
 

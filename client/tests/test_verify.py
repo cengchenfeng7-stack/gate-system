@@ -118,6 +118,20 @@ class TestVerifyExitWithFakeProbe(unittest.TestCase):
         self.assertEqual(node.exit_profile.network_type, "residential")
         self.assertIn("support", node.scenes)
 
+    def test_latency_flows_to_outcome_and_metrics(self):
+        """延迟必须一路落到 node.metrics——原先只喂场景评估、不落库，
+        界面延迟列永远是「—」（2026-11-20 用户真机指出）。"""
+        node = make_node()
+        probe = lambda n: ProbeResult(  # noqa: E731
+            alive=True, exit_ip="5.6.7.8", country="Japan", country_code="JP",
+            org="NTT EAST", is_clean=True, latency_ms=123.0, jitter_ms=7.0)
+        out = verify_exit(node, probe)
+        self.assertEqual(out.latency_ms, 123.0)
+        self.assertEqual(out.jitter_ms, 7.0)
+        apply_outcome(node, out)
+        self.assertEqual(node.metrics.latency_ms, 123.0)
+        self.assertEqual(node.metrics.jitter_ms, 7.0)
+
     def test_dead_link_not_ok_and_profile_untouched(self):
         node = make_node()
         out = verify_exit(node, lambda n: ProbeResult(alive=False, error="链路不通"))

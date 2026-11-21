@@ -25,7 +25,7 @@ from client.ui import cli
 VLESS_LINK = ("vless://11111111-2222-3333-4444-555555555555"
               "@example.com:443?security=tls#vless-proxy-verify")
 
-DEFAULT_PROXY = "http://127.0.0.1:10809"      # SingBoxEngine 默认 http_port（探针走 HTTP 入站）
+DEFAULT_PROXY = "http://127.0.0.1:7897"      # SingBoxEngine 默认 http_port（探针走 HTTP 入站）
 CUSTOM_PROXY = "http://127.0.0.1:18089"       # 构造参数改过端口的
 
 
@@ -113,7 +113,7 @@ class TestVerifyThroughProxy(unittest.TestCase):
         self.assertEqual(self.rec.factory_probe_calls, 1)   # 走的是 probe_factory 探针
         self.assertIn("5.6.7.8", out)
 
-    # 3. 自定义端口 → proxy 用引擎实例自己的 http_proxy_url，不许写死 10809
+    # 3. 自定义端口 → proxy 用引擎实例自己的 http_proxy_url，不许写死 7897
     def test_custom_http_port_is_used_not_hardcoded(self):
         rc, out, err = self._connect_vless(FakeSingBoxEngine(http_port=18089))
         self.assertEqual(rc, 0, err)

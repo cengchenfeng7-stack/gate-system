@@ -80,6 +80,32 @@ class TestStore(unittest.TestCase):
             with Store(path) as s2:
                 self.assertEqual(s2.get_node("a").scenes, {"ai"})
 
+    def test_cross_thread_use(self):
+        """M3 图形界面的工作线程与主线程共用一个 Store：不许再报
+        'SQLite objects created in a thread can only be used in that
+        same thread'（2026-11-20 真机实测踩过，红条原样贴回）。"""
+        import threading
+        errors = []
+
+        def worker():
+            try:
+                for i in range(30):
+                    self.store.upsert_node(node(f"t{i % 3}", {"ai"}))
+                    self.store.get_node("t0")
+                    self.store.list_nodes()
+                    self.store.add_sample(VerifySample(
+                        node_id="t0", kind="verify", success=True, latency_ms=10))
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker) for _ in range(3)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(errors, [])
+        self.assertEqual(self.store.count_nodes(), 3)
+
 
 if __name__ == "__main__":
     unittest.main()

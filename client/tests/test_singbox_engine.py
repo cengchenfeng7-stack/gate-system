@@ -12,6 +12,8 @@ import base64
 import glob
 import json
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -57,6 +59,21 @@ import sys
 sys.stderr.write("FAKE-ERR 配置解析失败\n")
 sys.exit(1)
 """
+
+FAKE_XHTTP_NO = r"""#!/usr/bin/env python3
+import sys
+if len(sys.argv) > 1 and sys.argv[1] == "check":
+    sys.stderr.write("FATAL decode config: outbounds[0].transport: "
+                     "unknown transport type: xhttp\n")
+    sys.exit(1)
+sys.exit(0)
+"""
+
+FAKE_XHTTP_OK = r"""#!/usr/bin/env python3
+import sys
+if len(sys.argv) > 1 and sys.argv[1] == "check":
+    sys.exit(0)
+""" + FAKE_GOOD.split("\n", 1)[1]
 
 
 def vless_node(query=None, uuid=VLESS_UUID):
@@ -116,13 +133,13 @@ def singbox_temp_dirs() -> set:
 
 class TestBasics(unittest.TestCase):
     def test_module_constants_and_proxy_url(self):
-        self.assertEqual(DEFAULT_SOCKS_PORT, 10808)
-        self.assertEqual(DEFAULT_HTTP_PORT, 10809)
+        self.assertEqual(DEFAULT_SOCKS_PORT, 7898)
+        self.assertEqual(DEFAULT_HTTP_PORT, 7897)
         self.assertEqual(SINGBOX_PROTOCOLS, ("vless", "ss", "trojan", "vmess"))
         eng = SingBoxEngine()
         self.assertEqual(eng.name, "sing-box")
-        self.assertEqual(eng.proxy_url, "socks5://127.0.0.1:10808")
-        self.assertEqual(eng.http_proxy_url, "http://127.0.0.1:10809")
+        self.assertEqual(eng.proxy_url, "socks5://127.0.0.1:7898")
+        self.assertEqual(eng.http_proxy_url, "http://127.0.0.1:7897")
         eng = SingBoxEngine(socks_port=18089, http_port=18090)
         self.assertEqual(eng.proxy_url, "socks5://127.0.0.1:18089")
         self.assertEqual(eng.http_proxy_url, "http://127.0.0.1:18090")
@@ -209,6 +226,24 @@ class TestBuildConfig(unittest.TestCase):
     def test_vless_tcp_no_transport(self):
         out = self.outbound(vless_node({"type": "tcp"}))
         self.assertNotIn("transport", out)
+
+    def test_vless_xhttp_transport(self):
+        # 2026-11-20 真机缺口：二猫池里有 xhttp 节点（如瑞典 SWE 2），
+        # 引擎原先直接拒。host 是顶层字段、不是 Host 头。
+        out = self.outbound(vless_node({
+            "type": "xhttp", "path": "/xh", "host": "xh.example.com",
+            "mode": "packet-up", "security": "tls"}))
+        self.assertEqual(out["transport"],
+                         {"type": "xhttp", "path": "/xh",
+                          "host": "xh.example.com", "mode": "packet-up"})
+        # sni 缺省 → server_name 回退传输 host 参数（与 ws 同口径）
+        self.assertEqual(out["tls"]["server_name"], "xh.example.com")
+
+    def test_vless_xhttp_defaults_and_bad_mode(self):
+        out = self.outbound(vless_node({"type": "xhttp", "mode": "bogus"}))
+        self.assertEqual(out["transport"], {"type": "xhttp", "path": "/"})
+        out2 = self.outbound(vless_node({"type": "xhttp", "mode": "auto"}))
+        self.assertEqual(out2["transport"]["mode"], "auto")
 
     def test_ss(self):
         out = self.outbound(ss_node())
@@ -398,6 +433,59 @@ class TestLifecycle(unittest.TestCase):
             eng.stop(handle)                          # 重复 stop 无害
             self.assertEqual(eng.status(handle), "stopped")
 
+    def test_xhttp_rejected_by_kernel_clear_error(self):
+        """官方内核不认 xhttp、又没装 lx：start 必须快速给出人话错误、
+        不留临时目录（2026-11-20 真机实测 v1.14.4 check 报
+        unknown transport type）。lx 路径钉死不存在，保证测试与本机
+        是否真装了 lx 无关。"""
+        with tempfile.TemporaryDirectory() as d:
+            fake = write_fake_binary(d, "fake-sing-box-noxhttp", FAKE_XHTTP_NO)
+            eng = SingBoxEngine(binary=fake, socks_port=18093, http_port=18094,
+                                lx_binary="/nonexistent/dir/sing-box-lx")
+            before = singbox_temp_dirs()
+            with self.assertRaises(EngineError) as ctx:
+                eng.start(vless_node({"type": "xhttp", "security": "tls"}))
+            msg = str(ctx.exception)
+            self.assertIn("不支持 xhttp", msg)
+            self.assertIn("内核", msg)
+            self.assertEqual(singbox_temp_dirs(), before)
+
+    def test_xhttp_capable_kernel_starts(self):
+        """内核认 xhttp（check 过）时 start 照常走完生命周期。"""
+        with tempfile.TemporaryDirectory() as d:
+            fake = write_fake_binary(d, "fake-sing-box-xhttp", FAKE_XHTTP_OK)
+            eng = SingBoxEngine(binary=fake, socks_port=18095, http_port=18096,
+                                ready_timeout=10.0, lx_binary=fake)
+            handle = eng.start(vless_node({"type": "xhttp", "security": "tls"}))
+            self.addCleanup(lambda: eng.stop(handle))
+            self.assertEqual(eng.status(handle), "running")
+            eng.stop(handle)
+            self.assertEqual(eng.status(handle), "stopped")
+
+    def test_xhttp_prefers_lx_binary(self):
+        """主内核不认 xhttp、lx 认：start 自动改用 lx 跑通。
+        非 xhttp 节点则仍然走主内核（lx 只伺候 xhttp）。"""
+        with tempfile.TemporaryDirectory() as d:
+            main_fake = write_fake_binary(d, "fake-main", FAKE_XHTTP_NO)
+            lx_fake = write_fake_binary(d, "fake-lx", FAKE_XHTTP_OK)
+            eng = SingBoxEngine(binary=main_fake, lx_binary=lx_fake,
+                                socks_port=18097, http_port=18098,
+                                ready_timeout=10.0)
+            handle = eng.start(vless_node({"type": "xhttp", "security": "tls"}))
+            self.addCleanup(lambda: eng.stop(handle))
+            self.assertEqual(eng.status(handle), "running")
+            eng.stop(handle)
+            # 非 xhttp：主内核是好的、lx 是坏的——能跑通就证明没碰 lx
+            good_main = write_fake_binary(d, "fake-main-good", FAKE_GOOD)
+            bad_lx = write_fake_binary(d, "fake-lx-bad", FAKE_QUIT)
+            eng2 = SingBoxEngine(binary=good_main, lx_binary=bad_lx,
+                                 socks_port=18099, http_port=18100,
+                                 ready_timeout=10.0)
+            handle2 = eng2.start(vless_node({"security": "tls"}))
+            self.addCleanup(lambda: eng2.stop(handle2))
+            self.assertEqual(eng2.status(handle2), "running")
+            eng2.stop(handle2)
+
     def test_early_exit_reports_log_tail_and_cleans_up(self):
         with tempfile.TemporaryDirectory() as d:
             fake = write_fake_binary(d, "fake-sing-box-quit", FAKE_QUIT)
@@ -410,6 +498,65 @@ class TestLifecycle(unittest.TestCase):
             self.assertIn("sing-box 启动失败", msg)
             self.assertIn("FAKE-ERR", msg)           # 假二进制的 stderr 进了日志尾巴
             self.assertEqual(singbox_temp_dirs(), before)   # 临时目录已清理
+
+
+class TestLifecycleGuard(unittest.TestCase):
+    """生命周期兜底（2026-11-21）：所有者异常消失不留孤儿引擎。
+    真机教训：探测引擎残留一下午（13:58 起、占 10818 无人回收）。"""
+
+    def test_start_writes_owner_meta_and_tracks_live(self):
+        with tempfile.TemporaryDirectory() as d:
+            fake = write_fake_binary(d, "fake-sing-box", FAKE_GOOD)
+            eng = SingBoxEngine(binary=fake, socks_port=18101,
+                                http_port=18102, ready_timeout=10.0)
+            handle = eng.start(vless_node({"security": "tls"}))
+            self.addCleanup(lambda: eng.stop(handle))
+            meta_path = os.path.join(handle.config_dir, "engine.json")
+            self.assertTrue(os.path.isfile(meta_path))
+            with open(meta_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+            self.assertEqual(meta["owner_pid"], os.getpid())
+            self.assertEqual(meta["proc_pid"], handle.proc.pid)
+            self.assertIn(handle, eng._live_handles)
+            eng.stop(handle)
+            self.assertNotIn(handle, eng._live_handles)
+
+    def test_stop_all_live_stops_everything(self):
+        with tempfile.TemporaryDirectory() as d:
+            fake = write_fake_binary(d, "fake-sing-box", FAKE_GOOD)
+            eng = SingBoxEngine(binary=fake, socks_port=18103,
+                                http_port=18104, ready_timeout=10.0)
+            handle = eng.start(vless_node({"security": "tls"}))
+            self.addCleanup(lambda: eng.stop(handle))
+            eng._stop_all_live()
+            self.assertEqual(eng.status(handle), "stopped")
+            self.assertEqual(eng._live_handles, [])
+
+    def test_reap_kills_orphan_keeps_live_owner(self):
+        root = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
+        orphan_dir = os.path.join(root, "gate-singbox-orphan")
+        os.makedirs(orphan_dir)
+        sleeper = subprocess.Popen(["sleep", "300"])
+        self.addCleanup(
+            lambda: sleeper.poll() is None and sleeper.kill())
+        with open(os.path.join(orphan_dir, "engine.json"), "w",
+                  encoding="utf-8") as f:
+            json.dump({"owner_pid": 999999, "proc_pid": sleeper.pid}, f)
+        live_dir = os.path.join(root, "gate-singbox-live")
+        os.makedirs(live_dir)
+        sleeper2 = subprocess.Popen(["sleep", "300"])
+        self.addCleanup(
+            lambda: sleeper2.poll() is None and sleeper2.kill())
+        with open(os.path.join(live_dir, "engine.json"), "w",
+                  encoding="utf-8") as f:
+            json.dump({"owner_pid": os.getpid(), "proc_pid": sleeper2.pid}, f)
+        reaped = SingBoxEngine.reap_stale_engines(root=root)
+        self.assertEqual(reaped, 1)
+        self.assertIsNotNone(sleeper.poll())     # 孤儿已被杀（poll 收尸）
+        self.assertFalse(os.path.exists(orphan_dir))
+        self.assertIsNone(sleeper2.poll())        # 活所有者的没动
+        self.assertTrue(os.path.isdir(live_dir))
 
 
 if __name__ == "__main__":

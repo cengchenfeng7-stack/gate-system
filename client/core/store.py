@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -67,14 +68,20 @@ class Store:
     def __init__(self, path: str = ":memory:"):
         if path != ":memory:":
             os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-        self._conn = sqlite3.connect(path)
+        # check_same_thread=False + 内部锁：M3 图形界面里连接/验出口跑在
+        # 工作线程、表格读取在主线程，同一个 Store 要跨线程用（sqlite
+        # 连接对象本身不是线程安全的，靠这把 RLock 串行化全部访问）。
+        self._lock = threading.RLock()
+        self._conn = sqlite3.connect(path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
-        self._conn.executescript(_SCHEMA)
-        self._conn.commit()
+        with self._lock:
+            self._conn.executescript(_SCHEMA)
+            self._conn.commit()
         self.path = path
 
     def close(self):
-        self._conn.close()
+        with self._lock:
+            self._conn.close()
 
     def __enter__(self):
         return self
@@ -84,6 +91,10 @@ class Store:
 
     # ---------------- nodes ----------------
     def upsert_node(self, node: Node) -> Node:
+        with self._lock:
+            return self._upsert_node_impl(node)
+
+    def _upsert_node_impl(self, node: Node) -> Node:
         """插入或更新。已存在时保留库里的人工标记（pin/ban 不被来源刷新冲掉）。"""
         old = self.get_node(node.id)
         if old is not None:
@@ -127,11 +138,18 @@ class Store:
         })
 
     def get_node(self, node_id: str) -> Optional[Node]:
-        row = self._conn.execute("SELECT * FROM nodes WHERE id = ?", (node_id,)).fetchone()
-        return self._row_to_node(row) if row else None
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM nodes WHERE id = ?", (node_id,)).fetchone()
+            return self._row_to_node(row) if row else None
 
     def list_nodes(self, scene: Optional[str] = None, source: Optional[str] = None,
                    include_banned: bool = False):
+        with self._lock:
+            return self._list_nodes_impl(scene=scene, source=source,
+                                         include_banned=include_banned)
+
+    def _list_nodes_impl(self, scene: Optional[str] = None, source: Optional[str] = None,
+                         include_banned: bool = False):
         if scene is not None and scene not in SCENES:
             raise ValueError(f"未知场景: {scene}（可选 {SCENES}）")
         if source is not None and source not in SOURCES:
@@ -147,14 +165,16 @@ class Store:
         return nodes
 
     def count_nodes(self) -> int:
-        return self._conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
+        with self._lock:
+            return self._conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
 
     def _set_flag(self, node_id: str, column: str, value: bool) -> bool:
-        cur = self._conn.execute(
-            f"UPDATE nodes SET {column} = ?, updated_at = ? WHERE id = ?",
-            (int(value), time.time(), node_id))
-        self._conn.commit()
-        return cur.rowcount > 0
+        with self._lock:
+            cur = self._conn.execute(
+                f"UPDATE nodes SET {column} = ?, updated_at = ? WHERE id = ?",
+                (int(value), time.time(), node_id))
+            self._conn.commit()
+            return cur.rowcount > 0
 
     def set_pinned(self, node_id: str, pinned: bool = True) -> bool:
         return self._set_flag(node_id, "pinned", pinned)
@@ -164,6 +184,10 @@ class Store:
 
     # ---------------- samples ----------------
     def add_sample(self, sample: VerifySample) -> None:
+        with self._lock:
+            self._add_sample_impl(sample)
+
+    def _add_sample_impl(self, sample: VerifySample) -> None:
         ts = sample.ts or time.time()
         self._conn.execute(
             """INSERT INTO verify_samples (node_id, ts, kind, success, latency_ms, jitter_ms, exit_ip, detail)
@@ -173,6 +197,10 @@ class Store:
         self._conn.commit()
 
     def samples_for(self, node_id: str, kind: Optional[str] = None):
+        with self._lock:
+            return self._samples_for_impl(node_id, kind=kind)
+
+    def _samples_for_impl(self, node_id: str, kind: Optional[str] = None):
         if kind:
             rows = self._conn.execute(
                 "SELECT * FROM verify_samples WHERE node_id = ? AND kind = ? ORDER BY ts",
