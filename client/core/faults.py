@@ -728,7 +728,7 @@ FILE_ANCHORS = {
         # 同步改针，防漂移探测器失效；task15 的审计基线 0.17.0 仍由
         # DESIGN §0 声明，与针值无关）。假数据默认值不在本区块——按
         # 裁决不动（见 _DOC_NETS 按类放行，build_deb.py 修复副本）。
-        "0.26.0",
+        "0.29.0",
     ),
 }
 
@@ -791,5 +791,5 @@ def iter_anchor_failures(root: str = None):
 #    本文件在 client-dev/client/core/ 内时 parents[2] 即 client-dev 根
 #    （VM 上与旧默认值同路径；本机上即 ~/gate-client）；GATE_CLIENT_DEV_ROOT
 #    仍可覆盖。work15/ 原型副本保留旧写死默认值。
-# 2. FILE_ANCHORS 的 client/VERSION 针为 0.26.0（集成版本号，适配 4）。
+# 2. FILE_ANCHORS 的 client/VERSION 针为 0.29.0（集成版本号，适配 4）。
 # 其余与原件逐行一致。

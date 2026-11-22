@@ -41,9 +41,11 @@ import sys
 import time
 import urllib.request
 
+from ..core import backup_group
 from ..core import classify_proto
 from ..core import diag
 from ..core import diag_collect
+from ..core import failover
 from ..core import history
 from ..core import settings_store as settings_store_io, site_blocklist
 from ..core import speedtest
@@ -338,6 +340,10 @@ if _QT_OK:
             self._last_node_count = -1   # ②区库变更对账游标
             self._batch_active = False   # ②区按板块批量测进行中旗（task19）
             self._batch_stop = False     # 批量停止旗（后台 _run_batch 同名同义）
+            # U6 ④容灾区（task21）：替换进行中旗（tag="failover" 任务收尾
+            # 复位）+ 因 _busy 暂缓待派发的容灾信号（poll_once/任务收尾补派）。
+            self._failover_active = False
+            self._failover_pending = None
 
             if orchestrator is not None:
                 self.orchestrator = orchestrator
@@ -386,6 +392,7 @@ if _QT_OK:
                     settings=self.settings, settings_file=settings_file)
                 self.engines = holder.get("engines", self.orchestrator.engines)
             self._install_event_listener()
+            self._setup_failover()   # U6：④容灾控制器装配（work21/WIRING.md 落点③）
 
             self.setWindowTitle("gate-client · 使用界面")
             self.resize(1080, 640)
@@ -677,6 +684,84 @@ if _QT_OK:
             文本与 CLI doctor / 02-checks.txt 同一份 render_checks 口径）。"""
             QMessageBox.information(self, "一键诊断", text)
 
+        # ---------------- ④ 容灾/自动替换（U6/task21） ----------------
+        def _setup_failover(self):
+            """④容灾控制器装配（work21/WIRING.md 落点③）。
+
+            failover.FailoverController 全部纯逻辑、依赖注入：会话通道 =
+            本窗 orchestrator 原样（disconnect/connect，orchestrator
+            零改动）；组与总开关每次现读 backup_group.json（与
+            sources.json 同目录，改即见）；样本走 history.record
+            kind="failover"（latency 恒空，不污染养鱼池延迟统计）；
+            告警走本窗 _show_alert + 托盘。开关关时控制器零动作零记录
+            （failover.py handle 首检查）。本窗只接线不决策。"""
+            store, orch = self.store, self.orchestrator
+
+            def _group():
+                return backup_group.load_group(
+                    backup_group.backup_group_path(store.path or "client.db"))
+
+            def _last_link_ok(node_id):
+                last = history.last_result(store, node_id)
+                return last[0] if last else None
+
+            def _update_extra(node_id, extra):
+                node = store.get_node(node_id)
+                if node is not None:
+                    node.extra = dict(extra)
+                    store.upsert_node(node)
+
+            self.failover = failover.FailoverController(failover.FailoverOps(
+                enabled=lambda: _group().get("enabled", False),
+                group_node_ids=lambda: _group().get("node_ids", []),
+                get_node=store.get_node,
+                last_link_ok=_last_link_ok,
+                active_node_id=lambda: orch.active_node_id,
+                disconnect=orch.disconnect,
+                connect=orch.connect,
+                record_sample=lambda node_id, success, detail: history.record(
+                    store, node_id, "failover", success, detail=detail),
+                update_node_extra=_update_extra,
+                alert=self._failover_alert,
+            ))
+
+        def _failover_feed(self, reason, node_id):
+            """U6 容灾信号入口（work21/WIRING.md 落点④）。
+
+            两路喂入：本窗 _on_session_event 的 dropped 分支（引擎掉线），
+            后台窗 _finish_health_probe 的 HEALTH_DEAD 分支（main() 把本
+            适配器注入 backend._failover_feed）。suspect 不进任何一路
+            （§5.1：不触发替换）。信号只登记，动作经 _run_task 串行通道
+            执行——与用户连接同一条管道，绝不另起线程同时碰 orchestrator。"""
+            if self._failover_active:
+                return          # 单飞：一轮替换进行中，同因信号不叠加
+            if self._busy:
+                # 用户任务占着 orchestrator 串行通道：暂存待派发，
+                # poll_once / 任务收尾后重试，不丢信号。
+                self._failover_pending = (reason, node_id)
+                return
+            self._failover_pending = None
+            self._failover_active = True
+            ctrl = self.failover
+            self._run_task("failover", lambda: ctrl.handle(reason, node_id))
+
+        def _failover_retry_pending(self):
+            """暂存容灾信号补派（_busy 清空后由 poll_once / 任务收尾调）。"""
+            if self._failover_pending and not self._busy:
+                pending = self._failover_pending
+                self._failover_pending = None
+                self._failover_feed(*pending)
+
+        def _failover_alert(self, payload):
+            """容灾告警展示（work21/WIRING.md 落点⑦）：红色告警条 + 托盘
+            通知，复用既有通道；文案由 failover.py 生成（§5.3 模板：
+            「已按容灾替换：A → B（原因：…）」）。"""
+            text = payload.get("text", "")
+            self._show_alert(text)
+            if self.tray is not None:
+                self.tray.showMessage("gate-client 容灾替换", text,
+                                      QSystemTrayIcon.Warning, 5000)
+
         # ---------------- ② 区数据刷新 ----------------
         def refresh_boards(self):
             """②区刷新：整库按 classify_proto.board_of 分板块（判不出维度落
@@ -957,6 +1042,9 @@ if _QT_OK:
             history.record(self.store, node.id, "verify", True,
                            latency_ms=outcome.latency_ms,
                            exit_ip=node.exit_profile.ip, detail="验出口通过")
+            # U6 §5.4：验真成功清「容灾换下」标记（无标记 no-op；恢复与否
+            # 由既有验真口径说了算，不由容灾模块自己判断）。
+            failover.clear_mark_on_link_success(self.store, node.id, True)
             ep = node.exit_profile
             lat = (f"，延迟 {history.format_latency_ms(outcome.latency_ms)}"
                    if outcome.latency_ms is not None else "")
@@ -1217,6 +1305,8 @@ if _QT_OK:
             库计数变化时重排（后台入库/删除后本窗即见，同一 SQLite）。"""
             if not self._busy:
                 self.orchestrator.poll()
+                # U6：_busy 清空后补派暂存的容灾信号（如有）。
+                self._failover_retry_pending()
             if self.orchestrator.state == Orchestrator.CONNECTED:
                 if self._session_state != ST_CONNECTED:
                     self._set_session_state(ST_CONNECTED)
@@ -1286,6 +1376,10 @@ if _QT_OK:
                 self._set_session_state(ST_CONNECTED)
                 self._apply_node_detail(ev.node_id)
                 self._clear_alert()
+                # U6 §5.4：连接成功（含容灾替换选中的新节点）= 验出口通过，
+                # 清掉残留的「容灾换下」标记（clear_mark_on_link_success
+                # 只动 failover_* 两键，对 banned/quarantined 只读不写）。
+                failover.clear_mark_on_link_success(self.store, ev.node_id, True)
             elif ev.kind == "verify_failed":
                 self._set_session_state(ST_DROPPED)
                 self._show_alert(f"假连已断开：{ev.detail}")
@@ -1297,6 +1391,9 @@ if _QT_OK:
                 if self.tray is not None:
                     self.tray.showMessage("gate-client 节点掉线", ev.detail,
                                           QSystemTrayIcon.Warning, 5000)
+                # U6 容灾触发（work21/WIRING.md 落点⑤）：引擎掉线喂给容灾
+                # 控制器（开关关时零动作零记录）。
+                self._failover_feed(failover.REASON_ENGINE_DROPPED, ev.node_id)
             elif ev.kind == "error":
                 self._set_session_state(ST_DROPPED)
                 self._show_alert(f"连接失败：{ev.detail}")
@@ -1327,6 +1424,11 @@ if _QT_OK:
                 self._update_action_states()
                 return
             self._busy = False
+            if tag == "failover":
+                # U6 容灾替换收尾（work21/WIRING.md 落点⑥）：复位单飞旗；
+                # 告警已由控制器经 _failover_alert 出过，回执不重复弹；
+                # 控制器异常走下方通用「操作失败」告警。
+                self._failover_active = False
             if tag == "batch":
                 self._batch_active = False   # 批量收尾（旗标复位，后台同款）
             if tag == "special_batch":
@@ -1337,6 +1439,9 @@ if _QT_OK:
                     self._show_alert(str(payload))
                 else:
                     self._show_alert(f"操作失败：{payload}")
+            elif tag == "failover":
+                # U6：正常回执后补派暂存信号（如有）。
+                self._failover_retry_pending()
             elif tag == "batch" and isinstance(payload, tuple):
                 (_kind, ok_n, fail_n, skip_n, done, total, label,
                  speed_n, speed_notes) = payload
