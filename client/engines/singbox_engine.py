@@ -49,6 +49,8 @@ from typing import Optional
 from ..core.health import check_ports_free, describe_occupied
 from ..core.model import Node
 from ..core import tun_config as _tun
+from ..core import usage_merge as _usage_merge
+from ..core import usage_model as _usage_model
 from .base import EngineError, EngineEvent
 
 DEFAULT_SOCKS_PORT = 7898
@@ -103,7 +105,8 @@ class SingBoxEngine:
                  http_port: int = DEFAULT_HTTP_PORT,
                  ready_timeout: float = 15.0, popen_factory=None,
                  lx_binary: Optional[str] = None,
-                 takeover_mode: str = "proxy"):
+                 takeover_mode: str = "proxy",
+                 usage_provider=None):
         # 构造器不碰文件系统、不找二进制——二进制解析懒到 find_binary/start
         self._binary = binary
         self._lx_binary = lx_binary
@@ -120,6 +123,10 @@ class SingBoxEngine:
             raise EngineError(
                 f"未知接管方式 {takeover_mode!r}——支持 {'/'.join(_tun.MODES)}")
         self.takeover_mode = mode
+        # U2（task17）：使用设置供给器——连接时经它现读设置存储与网站
+        # 黑名单（「下次连接生效」口径的机械保证）。None = 不合并
+        # （现行行为，零变化，默认值红线）。
+        self.usage_provider = usage_provider
         atexit.register(self._stop_all_live)
 
     # ---------------- 二进制解析 ----------------
@@ -255,7 +262,28 @@ class SingBoxEngine:
                     config, _tun.build_tun_inbound())
             except ValueError as exc:
                 raise EngineError(f"TUN 配置合并失败: {exc}") from exc
+        fragment = self._usage_fragment()
+        if fragment is not None:
+            try:
+                config = _usage_merge.merge_usage_config(config, fragment)
+            except ValueError as exc:
+                raise EngineError(f"使用设置合并失败: {exc}") from exc
         return config
+
+    def _usage_fragment(self):
+        """U2：经供给器现读使用设置与网站黑名单，产出路由片段。
+        供给器缺失/返回 usage=None → 不合并（现行行为）。供给器异常
+        显式报错不静默降级——设置非法时连接必须失败，而不是按用户没
+        设过的参数连（与 tun 合并失败同款 EngineError 口径）。"""
+        if self.usage_provider is None:
+            return None
+        try:
+            usage, blocklist = self.usage_provider()
+        except ValueError as exc:
+            raise EngineError(f"使用设置/黑名单读取失败: {exc}") from exc
+        if usage is None:
+            return None
+        return _usage_model.build_route_config(usage, blocklist)
 
     @staticmethod
     def _need_endpoint(label: str, host, port) -> None:
