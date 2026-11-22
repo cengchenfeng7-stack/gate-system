@@ -6,8 +6,10 @@
 与 CLI 共用同一套核心接线（直接复用 cli._build_orchestrator），保证
 「界面操作与 CLI 行为一致」（设计第四节 M3 验收）：
 
-- 四个来源页签（来源是第一组织维度，用户 2026-11-19 定），场景只是
-  页内徽标/过滤；节点排序走 history.sorted_nodes（养鱼池口径）。
+- 三个来源页签（来源是第一组织维度，用户 2026-11-19 定；task8/task23
+  落页：OpenVPN 页与 VPNGate feed 页合并为「VPNGate 来源页」，work8/
+  DESIGN §1），场景只是页内徽标/过滤；节点排序走 history.sorted_nodes
+  （养鱼池口径）。
 - 连接/断开/验出口全部经 Orchestrator——手动点选、连后强制验出口、
   掉线只告警停在原地，绝不自动切换（铁律在 orchestrator 里写死）。
 - 会话在窗口进程内常驻：关窗最小化到托盘，托盘显示连接状态；
@@ -31,26 +33,33 @@ import time
 from collections import deque
 
 from ..core import history
+from ..core import settings_store as settings_store_io, site_blocklist
 from ..core.health import (HEALTH_DEAD, HEALTH_SUSPECT, check_ports_free,
                            check_tun_takeover, connection_health_detail,
                            describe_occupied, proxy_conflict,
                            read_system_proxy)
 from ..core.tun_config import MODES, mode_plan
 from ..core.model import SCENES, SOURCE_LABELS, SOURCES
+from ..core.usage_model import UsageSettings
 from ..core.orchestrator import Orchestrator, OrchestratorError
+from ..core.settings_proto import (Settings, SettingsCorruptError,
+                                   SettingsError, SettingsStore,
+                                   SettingsVersionError, bootstrap_settings,
+                                   derived_data_dir, merge, resolve_db_path,
+                                   settings_file_path)
 from ..core.store import Store
 from ..core.verify import (apply_outcome, make_real_probe, pollution_of,
                            verify_exit)
 from ..engines.base import EngineError
-from ..engines.singbox_engine import (DEFAULT_HTTP_PORT, SINGBOX_PROTOCOLS,
-                                      SingBoxEngine)
+from ..engines.singbox_engine import SINGBOX_PROTOCOLS, SingBoxEngine
 from ..sources import feed as feed_src
 from ..sources import format_import as format_src
 from ..sources import manual as manual_src
 from ..sources import pipeline as pipeline_src
 from ..sources import source_registry as registry_src
 from ..sources import subscription as subscription_src
-from .cli import DEFAULT_DB, _build_orchestrator
+from ..sources.landing import run_startup_migration
+from .cli import _build_orchestrator
 
 SCENE_LABELS = {"support": "客服", "ai": "AI", "games": "游戏", "download": "下载"}
 NETWORK_LABELS = {"residential": "住宅", "datacenter": "机房", "unknown": "未知"}
@@ -138,8 +147,8 @@ try:
     from PySide6.QtCore import QObject, QSettings, QThread, QTimer, Qt, Signal
     from PySide6.QtGui import QAction, QColor, QIcon, QPixmap
     from PySide6.QtWidgets import (
-        QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog,
-        QHBoxLayout,
+        QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog,
+        QFileDialog, QHBoxLayout,
         QHeaderView, QInputDialog, QLabel, QMainWindow, QMessageBox, QPushButton,
         QSystemTrayIcon, QTabWidget, QTableWidget, QTableWidgetItem,
         QMenu, QVBoxLayout, QWidget,
@@ -153,6 +162,32 @@ INSTALL_HINT = ("缺少 PySide6，图形界面无法启动。\n"
                 "（命令行版不受影响：python -m client.ui.cli --help）")
 
 if _QT_OK:
+
+    def _qsettings_auto_probe_reader():
+        """QSettings("gate-client", "gui") 旧两键读取（§4.3 迁移专用注入）。
+        只读 auto_probe/enabled、auto_probe/interval_min——**last_node_id
+        与其他键一概不碰**（界面状态不是设置）；读不到/类型不符 → None
+        （迁移函数按默认处理）。迁移完成后应用代码不再读写这两键（停用，
+        §8-6）。"""
+        out = {"auto_probe_enabled": None, "auto_probe_interval_min": None}
+        try:
+            cfg = QSettings("gate-client", "gui")
+
+            def _get(key, type_):
+                try:
+                    return cfg.value(key, None, type=type_)
+                except Exception:
+                    return None
+
+            if cfg.contains("auto_probe/enabled"):
+                out["auto_probe_enabled"] = _get(
+                    "auto_probe/enabled", bool)
+            if cfg.contains("auto_probe/interval_min"):
+                out["auto_probe_interval_min"] = _get(
+                    "auto_probe/interval_min", int)
+        except Exception:
+            pass
+        return out
 
     class _Bridge(QObject):
         """把后台线程/编排器回调的事件转成 Qt 信号，统一回主线程处理。"""
@@ -234,14 +269,14 @@ if _QT_OK:
             layout.addWidget(self.table)
 
         def _import_actions(self):
-            """每个来源页只给属于自己的导入入口（来源即归属）。"""
+            """每个来源页只给属于自己的导入入口（来源即归属）。合并页
+            （vpngate）只剩「登记并更新 feed」一个登记入口——旧「登记
+            feed 镜像」入口随 feed_mirror 类型废除（task8/task23 落页，
+            work8/DESIGN §5.1、§6）。"""
             w = self.window
-            if self.source == "openvpn":
+            if self.source == "vpngate":
                 return [("导入 .ovpn", w.import_ovpn_files),
-                        ("登记 feed 镜像", w.register_feed_mirror),
-                        ("更新已登记来源", w.update_registered_sources)]
-            if self.source == "vpngate_feed":
-                return [("导入 feed 文件", w.import_feed_file),
+                        ("导入 feed 文件", w.import_feed_file),
                         ("登记并更新 feed", w.register_and_update_feed),
                         ("更新已登记来源", w.update_registered_sources)]
             if self.source == "pipeline":
@@ -326,9 +361,15 @@ if _QT_OK:
 
     class MainWindow(QMainWindow):
         def __init__(self, store: Store, orchestrator: Orchestrator = None,
-                     engines: dict = None, probe_factory=None):
+                     engines: dict = None, probe_factory=None,
+                     settings: Settings = None, settings_store=None):
             super().__init__()
             self.store = store
+            # 统一设置（task24 §8 接线）：settings=None → 默认值（=现行行为）；
+            # settings_store=None → 无落盘点（离线测试替身形态，落盘跳过）。
+            self.settings = (settings if settings is not None else Settings())
+            self.settings_store = settings_store
+            self._applying_settings = False   # 程序化同步控件期间挡重复落盘
             self.bridge = _Bridge()
             self.bridge.session_event.connect(self._on_session_event)
             self.bridge.task_finished.connect(self._on_task_finished)
@@ -357,10 +398,37 @@ if _QT_OK:
                 def engine_factory():
                     from ..engines.openvpn_engine import OpenVPNEngine
                     from ..engines.singbox_engine import SINGBOX_PROTOCOLS, SingBoxEngine
+                    # task24 §8-1：out_dir 从派生基准目录（derived_data_dir：
+                    # 与库同目录——库路径已按 §8-3 优先级解析，无覆盖时即
+                    # settings.data_dir）的 ovpn_out 派生，同目录口径不变。
                     out_dir = os.path.join(
-                        os.path.dirname(os.path.abspath(store.path or "client.db")),
-                        "ovpn_out")
-                    singbox = SingBoxEngine()
+                        derived_data_dir(store.path, self.settings), "ovpn_out")
+                    # U2（task17）：使用设置供给器（与 cli 接线 A 同款；
+                    # store 已在场，覆盖目录同上推导）。
+                    # task24 §4.1：settings.json 落点不跟随 data_dir 设置——
+                    # 有 settings_store（main() 传入）时按它的落点现读，与
+                    # 设置页/③区同一份文件；无（离线测试形态）时维持 task17
+                    # 的「与库同目录」推导。
+                    settings_file = (self.settings_store.path
+                                     if self.settings_store is not None else None)
+
+                    def _usage_provider():
+                        data_dir = os.path.dirname(
+                            os.path.abspath(store.path or "client.db"))
+                        if settings_file is not None:
+                            current = settings_store_io.load_settings(settings_file)
+                        else:
+                            current = settings_store_io.load_settings(
+                                settings_store_io.settings_path(data_dir))
+                        usage = UsageSettings(**current.usage_dict())
+                        blocklist = site_blocklist.load_blocklist(
+                            site_blocklist.blocklist_path(data_dir))
+                        return usage, blocklist
+
+                    singbox = SingBoxEngine(
+                        usage_provider=_usage_provider,
+                        socks_port=self.settings.socks_port,
+                        http_port=self.settings.http_port)
                     built = {"openvpn": OpenVPNEngine(out_dir=out_dir)}
                     for proto in SINGBOX_PROTOCOLS:
                         built[proto] = singbox
@@ -372,7 +440,7 @@ if _QT_OK:
             # 编排器事件 → bridge（可能来自工作线程，必须走信号回主线程）
             self.orchestrator.on_event = lambda ev: self.bridge.session_event.emit(ev)
 
-            self.setWindowTitle("gate-client · 自研代理客户端")
+            self.setWindowTitle("gate-client · 后台（来源管理）")  # U1：现窗降后台（task16）
             self.resize(1080, 640)
             central = QWidget()
             root = QVBoxLayout(central)
@@ -455,9 +523,16 @@ if _QT_OK:
             refresh_btn = QPushButton("刷新")
             refresh_btn.clicked.connect(self.refresh_pages)
             actions.addWidget(refresh_btn)
+            # 设置页入口（task24 §5/§6）：模态对话框；五项规则字段的唯一
+            # 编辑入口在设置页（与③区共用同一份落盘值，不出现脏副本）。
+            self.settings_btn = QPushButton("设置")
+            self.settings_btn.clicked.connect(self.open_settings)
+            actions.addWidget(self.settings_btn)
             root.addLayout(actions)
 
-            self._setup_tray()
+            # U1（task16）：托盘归主窗（UsageWindow），后台窗不建托盘；
+            # self.tray 其余引用全有 is None 守卫，留 None 即自然 no-op。
+            self.tray = None
             self.poll_timer = QTimer(self)
             self.poll_timer.setInterval(5000)
             self.poll_timer.timeout.connect(self.poll_once)
@@ -498,7 +573,14 @@ if _QT_OK:
             return int(minutes) * 60_000 if minutes else 600_000
 
         def _on_auto_setting_changed(self, *_):
-            """开关/间隔变了：重设定时器并存档（QSettings）。"""
+            """开关/间隔变了：重设定时器并落盘（task24 §8-7 立即生效的接线点）。
+            存档改走 settings.json（_persist_auto_probe）；QSettings 的
+            auto_probe 两键已随迁移停用——不再读写（§4.3/§8-6）。"""
+            self._apply_auto_timer()
+            self._persist_auto_probe()
+
+        def _apply_auto_timer(self):
+            """开关/间隔 → 定时器（不落盘；启动恢复与程序化同步也走它）。"""
             if not hasattr(self, "auto_timer"):
                 return
             self.auto_timer.setInterval(self._auto_interval_ms())
@@ -506,25 +588,100 @@ if _QT_OK:
                 self.auto_timer.start()
             else:
                 self.auto_timer.stop()
-            cfg = QSettings("gate-client", "gui")
-            cfg.setValue("auto_probe/enabled", self.auto_chk.isChecked())
-            cfg.setValue("auto_probe/interval_min",
-                         self.auto_interval_combo.currentData())
+
+        def _persist_auto_probe(self):
+            """自动探测两项 → settings.json（唯一落盘点）。程序化同步控件
+            期间跳过（对话框已保存，避免重复写）；无 settings_store（离线
+            测试替身形态）跳过落盘。IO 失败显式告警，不静默吞。"""
+            if self.settings_store is None or self._applying_settings:
+                return
+            minutes = self.auto_interval_combo.currentData()
+            overrides = {"auto_probe_enabled": self.auto_chk.isChecked()}
+            if minutes is not None:
+                overrides["auto_probe_interval_min"] = int(minutes)
+            self.settings = merge(self.settings, overrides)
+            try:
+                self.settings_store.save(self.settings)
+            except OSError as exc:
+                self._show_alert(f"设置保存失败：{exc}")
 
         def _load_auto_settings(self):
-            cfg = QSettings("gate-client", "gui")
-            minutes = cfg.value("auto_probe/interval_min", 10, type=int)
-            idx = self.auto_interval_combo.findData(int(minutes))
+            """从统一设置恢复开关/间隔并起定时器（task24 §8-6：QSettings 的
+            auto_probe 两键已停用——值经 §4.3 迁移进 settings.json，这里只读
+            统一设置）。"""
+            idx = self.auto_interval_combo.findData(
+                int(self.settings.auto_probe_interval_min))
             if idx >= 0:
                 self.auto_interval_combo.setCurrentIndex(idx)
-            self.auto_chk.setChecked(
-                cfg.value("auto_probe/enabled", True, type=bool))
-            # 两项都与默认值相同时不触发信号，这里手动同步一次定时器
-            self._on_auto_setting_changed()
+            self.auto_chk.setChecked(bool(self.settings.auto_probe_enabled))
+            # 两项都与设置值相同时不触发信号，这里手动同步一次定时器
+            #（不落盘：启动恢复不算用户改动）
+            self._apply_auto_timer()
 
         def schedule_startup_probe(self):
             """开窗后先自动探一轮（由 main() 调用，测试不调它）。"""
             QTimer.singleShot(self._AUTO_STARTUP_DELAY_MS, self._maybe_auto_probe)
+
+        # ---------------- 设置页（task24 §5/§6 落页） ----------------
+        def open_settings(self):
+            """打开设置页（模态）。保存成功后的落地见 _apply_saved_settings
+            （§5.3 逐项生效时机）。无 settings_store（离线测试替身形态）
+            时不打开——落盘是设置页的硬前提，不搞「改了不存」的假入口。"""
+            if self.settings_store is None:
+                self._show_info("设置存储不可用，设置页未打开。")
+                return
+            from .settings_dialog import SettingsDialog
+            dlg = SettingsDialog(self.settings, self.settings_store, parent=self)
+            if dlg.exec() == QDialog.Accepted and dlg.saved_settings is not None:
+                self._apply_saved_settings(dlg.saved_settings)
+
+        def _apply_saved_settings(self, s: Settings):
+            """设置页保存后的窗侧落地（§5.3 逐项口径，不许含糊）：
+            - 自动探测：**立即生效**——控件同步 → _apply_auto_timer；
+            - 端口 / 规则五项：**下次连接生效**——空闲时即在保存点对齐
+              引擎端口（_sync_engine_ports_with_settings；连接中不进来，
+              断开后下次 connect 起新端口；连接构造点另有安全网）；规则
+              五项的消费点在引擎 build_config 尾部合并（U2 已接线：供给
+              器每次连接现读 settings.json）；
+            - data_dir：**下次启动生效**（main() 启动构造点，不搬家）。"""
+            self.settings = s
+            self._applying_settings = True
+            try:
+                idx = self.auto_interval_combo.findData(
+                    int(s.auto_probe_interval_min))
+                if idx >= 0:
+                    self.auto_interval_combo.setCurrentIndex(idx)
+                self.auto_chk.setChecked(bool(s.auto_probe_enabled))
+            finally:
+                self._applying_settings = False
+            self._apply_auto_timer()
+            self._sync_engine_ports_with_settings()
+            self._show_info(
+                "设置已保存：自动探测立即生效；端口 / 规则与网络下次连接"
+                "生效；数据目录下次启动生效（不会搬移旧数据）。")
+
+        def _sync_engine_ports_with_settings(self):
+            """连接构造点对齐（§5.3「下次连接生效 = 重启引擎」/ §8-1）：空闲时
+            若 sing-box 引擎端口与设置不一致（设置页改过端口），原地重建
+            引擎束——本次 connect 即用新端口；连接中不会进来（连接按钮已
+            禁用），断开后下次 connect 起新端口。OpenVPN 引擎不动：out_dir
+            属启动构造点（§5.3 下次启动生效）。仅有 settings_store 的真实
+            应用形态生效（外部注入引擎束的离线测试形态不介入）。"""
+            if self.settings_store is None:
+                return
+            if self.orchestrator.state != Orchestrator.IDLE:
+                return
+            old = next((e for e in self.engines.values()
+                        if isinstance(e, SingBoxEngine)), None)
+            if old is None or (old.socks_port == self.settings.socks_port
+                               and old.http_port == self.settings.http_port):
+                return
+            new = SingBoxEngine(socks_port=self.settings.socks_port,
+                                http_port=self.settings.http_port)
+            for proto in list(self.engines):
+                if self.engines[proto] is old:
+                    self.engines[proto] = new      # verifier 闭包共享同一 dict
+            self.orchestrator.engines = dict(self.engines)  # orchestrator 副本同步
 
         # ---------------- 托盘 ----------------
         def _setup_tray(self):
@@ -569,15 +726,9 @@ if _QT_OK:
                 QApplication.quit()
 
         def closeEvent(self, event):
-            # 关窗 = 最小化到托盘（会话常驻）；真正退出走托盘菜单。
-            if self.tray is not None:
-                event.ignore()
-                self.hide()
-                self.tray.showMessage(
-                    "gate-client", "已最小化到托盘，连接保持不变。",
-                    QSystemTrayIcon.Information, 3000)
-            else:
-                super().closeEvent(event)
+            # U1（task16）：后台窗关窗 = 真关（不再隐藏进托盘——会话常驻
+            # 已由主窗托盘承担；self.tray 恒为 None，旧分支不再成立）。
+            super().closeEvent(event)
 
         # ---------------- 数据刷新 ----------------
         def refresh_pages(self):
@@ -626,6 +777,9 @@ if _QT_OK:
                     f"（{node.extra.get('quarantine_reason', '')}），仍按你的点名连接。")
             # 健康预检（task5）：①端口被占 → 取消本次连接；②系统代理冲突 →
             # 只告警、照常连接（用户点名优先）。False=取消本次连接。
+            # 端口改动下次连接生效（task24 §5.3）：先在连接构造点对齐引擎
+            # 端口，预检与接管方式都作用于对齐后的引擎。
+            self._sync_engine_ports_with_settings()
             if not self._health_precheck(node):
                 return
             # 接管方式（task6）：连接前把控件当前模式写进引擎实例属性
@@ -1007,7 +1161,9 @@ if _QT_OK:
                     return False
                 our_port = engine.http_port
             else:
-                our_port = DEFAULT_HTTP_PORT
+                # 参照端口改用设置值（task24 §8-1 端口检查兜底点改读设置；
+                # 无设置 → 模块默认端口兜底）。
+                our_port = self.settings.http_port
             conflict = proxy_conflict(read_system_proxy(), our_port)
             if conflict["conflict"]:
                 self._show_alert(
@@ -1031,7 +1187,9 @@ if _QT_OK:
                     return
                 our_port = engine.http_port
             else:
-                our_port = DEFAULT_HTTP_PORT
+                # 参照端口改用设置值（task24 §8-1 端口检查兜底点改读设置；
+                # 无设置 → 模块默认端口兜底）。
+                our_port = self.settings.http_port
             conflict = proxy_conflict(read_system_proxy(), our_port)
             if conflict["conflict"]:
                 self._show_alert(
@@ -1084,7 +1242,9 @@ if _QT_OK:
                 return
             engine = next((e for e in self.engines.values()
                            if isinstance(e, SingBoxEngine)), None)
-            http_port = engine.http_port if engine is not None else DEFAULT_HTTP_PORT
+            # 参照端口改用设置值（task24 §8-1 端口检查兜底点改读设置）
+            http_port = (engine.http_port if engine is not None
+                         else self.settings.http_port)
             self._sysproxy_active = True
             self._launch_health(
                 "sysproxy_check",
@@ -1389,7 +1549,7 @@ if _QT_OK:
                        if e["page"] == source and e["enabled"]]
             if not entries:
                 return ("本页没有已登记的来源：订阅地址导入后自动登记，"
-                        "feed 页可用「登记并更新 feed」")
+                        "VPNGate 页可用「登记并更新 feed」")
             return "\n".join(
                 registry_src.update_entry(
                     reg, self.store, e["id"], fetch_fn=fetch_fn).summary()
@@ -1413,25 +1573,22 @@ if _QT_OK:
                 reg, self.store, entry_id, fetch_fn=fetch_fn).summary()
 
         def register_and_update_feed(self, fetch_fn=None):
-            """feed 页「登记并更新 feed」：首次登记官方 feed 地址并拉取。"""
+            """VPNGate 页「登记并更新 feed」：首次登记官方 feed 地址并拉取。
+            合并页唯一登记入口（task8/task23 落页，work8/DESIGN §5.1）。"""
             self._run_task(
                 "sources",
                 lambda: self._register_and_update(
                     "feed", "feed", "VPN Gate 官方 feed", fetch_fn=fetch_fn))
 
-        def register_feed_mirror(self, fetch_fn=None):
-            """OpenVPN 页「登记 feed 镜像」：同一份 feed 落 OpenVPN 页。"""
-            self._run_task(
-                "sources",
-                lambda: self._register_and_update(
-                    "feed_mirror", "feed-mirror",
-                    "VPN Gate feed 镜像（OpenVPN 页）", fetch_fn=fetch_fn))
-
     def main(argv=None) -> int:
         parser = argparse.ArgumentParser(prog="gate-client-gui",
                                          description="自研代理客户端（M3 图形界面）")
-        parser.add_argument("--db", default=DEFAULT_DB,
-                            help=f"本地数据库路径（默认 {DEFAULT_DB}）")
+        # --db 不给默认值：留 None 让下方按 §8-3 四档优先级解析
+        #（--db 显式 > GATE_CLIENT_DB > settings.data_dir > 内置默认）。
+        parser.add_argument("--db", default=None,
+                            help="本地数据库路径（默认按 统一设置 > "
+                                 "GATE_CLIENT_DB 环境变量 > 内置默认 "
+                                 "~/.local/share/gate-client/client.db 解析）")
         args = parser.parse_args(argv)
         app = QApplication(sys.argv)
         app.setApplicationName("gate-client")   # WM_CLASS 对齐 .desktop 的 StartupWMClass
@@ -1439,10 +1596,62 @@ if _QT_OK:
         app.setStyle("Fusion")                  # 统一控件底子，QSS 不被原生主题带偏
         app.setStyleSheet(DARK_QSS)
         app.setQuitOnLastWindowClosed(False)
-        store = Store(args.db)
-        window = MainWindow(store)
-        window.show()
-        window.schedule_startup_probe()
+        # —— 统一设置：加载 + 首次初始化 + QSettings 迁移（task24 §4/§8-6）——
+        # settings.json 跟随「显式覆盖目录，否则内置默认目录」（§4.1/§8-3）。
+        env_db = os.environ.get("GATE_CLIENT_DB")
+        sfile = settings_file_path(explicit_db=args.db, env_db=env_db)
+        sstore = SettingsStore(sfile)
+        try:
+            settings = bootstrap_settings(sstore, _qsettings_auto_probe_reader)
+        except SettingsVersionError as exc:
+            # §4.2：版本高于当前支持 → 拒读报错，不重置不覆盖
+            QMessageBox.critical(
+                None, "设置文件无法读取",
+                f"{exc}\n\n文件：{sfile}\n"
+                "设置文件由更新版本的客户端写入，请先用该版本处理，"
+                "本客户端不会覆盖它。")
+            return 2
+        except (SettingsCorruptError, SettingsError) as exc:
+            # §4.2：损坏 / 未知键 / 非法值 → 弹窗给文件路径 + 「重置为默认」；
+            # 重置 = 原文件改名留档（不静默覆盖、不删原始证据）再写默认
+            choice = QMessageBox.warning(
+                None, "设置文件有问题",
+                f"{exc}\n\n文件：{sfile}\n\n"
+                "是否重置为默认值？（原文件会改名留档，不会删除）",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if choice != QMessageBox.Yes:
+                return 2
+            settings = sstore.reset(tag="corrupt")
+        # 库路径四档优先级（task24 §8-3）；data_dir 档在此生效（下次启动
+        # 构造点）。
+        store = Store(resolve_db_path(explicit_db=args.db, env_db=env_db,
+                                      settings=settings))
+        # task23 落页：启动检测四页时代存量（sources.json 含 feed_mirror 残留
+        # ∨ 库内旧两键节点）→ 一次性迁移，幂等、误触发无害、不联网
+        # （work8/DESIGN §8-6；实现在 sources/landing.py，只调 merge_proto）。
+        # 位置在两窗装配之前：UsageWindow/MainWindow 构造即读库。
+        run_startup_migration(store)
+        # U1（task16，work16/DESIGN.md §3）：两窗装配——主窗 UsageWindow
+        # 在内建 orchestrator/engines，后台窗 MainWindow 注入同一实例，
+        # 事件通道由 main() 统一扇出到两窗 bridge。懒加载：usage_window
+        # 模块级 from .app import …，顶层 import 会循环导入。
+        # task24 落页：统一设置注入两窗（同一份 settings/settings_store——
+        # 值只有一份、存储只有一处，§6）。
+        from .usage_window import UsageWindow
+
+        usage = UsageWindow(store, settings=settings, settings_store=sstore)
+        backend = MainWindow(store, orchestrator=usage.orchestrator,
+                             engines=usage.engines,
+                             settings=settings, settings_store=sstore)
+        usage.set_backend_window(backend)
+
+        def _fanout(ev):
+            usage.bridge.session_event.emit(ev)
+            backend.bridge.session_event.emit(ev)
+
+        usage.orchestrator.on_event = _fanout
+        usage.show()                            # 主窗启动显示；后台窗不 show
+        backend.schedule_startup_probe()        # 自动探测留后台
         return app.exec()
 
 else:
