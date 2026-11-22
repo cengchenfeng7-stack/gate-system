@@ -67,8 +67,7 @@ class TestReauditAnchors(DevTreeTestCase):
     # R1：G13 后台动作排 14 控件单行 + 窗宽 1080 + 已降后台定位
     def test_r1_action_row_14_widgets_one_layout(self):
         self.assertIn("actions = QHBoxLayout()", _block(APP, 485, 485))
-        for lineno, needle in (
-                (460, "gate-client · 后台（来源管理）"),
+        for lineno, needle in ((460, "gate-client · 后台（来源管理）"),
                 (461, "self.resize(1080, 640)"),
                 (486, 'QPushButton("连 接")'),
                 (490, 'QPushButton("断开")'),
@@ -82,9 +81,9 @@ class TestReauditAnchors(DevTreeTestCase):
                 (527, "self.auto_interval_combo = QComboBox()"),
                 (534, 'QPushButton("测本页")'),
                 (537, 'QPushButton("一键全测")'),
-                (555, 'QPushButton("刷新")'),
-                (560, 'QPushButton("设置")'),
-                (563, "root.addLayout(actions)")):
+                (564, 'QPushButton("刷新")'),
+                (569, 'QPushButton("设置")'),
+                (572, "root.addLayout(actions)")):
             self.assertIn(needle, _block(APP, lineno, lineno),
                           f"app.py:{lineno} 应含 {needle!r}（R1 锚点漂移）")
 
@@ -92,8 +91,8 @@ class TestReauditAnchors(DevTreeTestCase):
     def test_r2_full_rebuild_and_resort_both_windows(self):
         self.assertIn("self.table.setRowCount(0)", _block(APP, 327, 327))
         self.assertIn("history.sorted_nodes(self.store, nodes)",
-                      _block(APP, 837, 837))
-        self.assertIn("self.refresh_pages()", _block(APP, 1620, 1620))
+                      _block(APP, 847, 847))
+        self.assertIn("self.refresh_pages()", _block(APP, 1658, 1658))
         self.assertIn("self.table.setRowCount(0)", _block(USAGE, 234, 234))
         self.assertIn(
             "page_nodes = history.sorted_nodes(self.store, groups.get(key, []))",
@@ -110,21 +109,21 @@ class TestReauditAnchors(DevTreeTestCase):
         self.assertIn("待主人裁定", _block(USAGE, 1544, 1545))
         self.assertIn("event.ignore()", _block(USAGE, 1547, 1547))
         self.assertIn("已最小化到托盘，连接保持不变。", _block(USAGE, 1550, 1550))
-        self.assertIn("def closeEvent(self, event):", _block(APP, 822, 822))
-        self.assertIn("super().closeEvent(event)", _block(APP, 825, 825))
+        self.assertIn("def closeEvent(self, event):", _block(APP, 832, 832))
+        self.assertIn("super().closeEvent(event)", _block(APP, 835, 835))
 
     # R4：G15 确认模态存量（只列选项不裁决）——逐处行号
     def test_r4_confirm_modals_inventory(self):
         self.assertIn('QMessageBox.question(self, "删除节点", text)',
-                      _block(APP, 1210, 1210))
-        self.assertIn("QMessageBox.question(", _block(APP, 1268, 1268))
-        self.assertIn("QMessageBox.question(", _block(APP, 1284, 1284))
-        self.assertIn("QInputDialog.getMultiLineText(", _block(APP, 1706, 1706))
-        self.assertIn("QInputDialog.getText(self", _block(APP, 1725, 1725))
-        for lineno in (300, 328, 345):
+                      _block(APP, 1248, 1248))
+        self.assertIn("QMessageBox.question(", _block(APP, 1306, 1306))
+        self.assertIn("QMessageBox.question(", _block(APP, 1322, 1322))
+        self.assertIn("QInputDialog.getMultiLineText(", _block(APP, 1744, 1744))
+        self.assertIn("QInputDialog.getText(self", _block(APP, 1763, 1763))
+        for lineno in (337, 365, 382):
             self.assertIn("QMessageBox.question(",
                           _block(SETTINGS, lineno, lineno))
-        for lineno in (316, 323):
+        for lineno in (353, 360):
             self.assertIn("QMessageBox.warning(",
                           _block(SETTINGS, lineno, lineno))
         self.assertIn('QMessageBox.information(self, "一键诊断", text)',
@@ -162,7 +161,7 @@ class TestReauditAnchors(DevTreeTestCase):
     # R8：G4 删废按钮静态文案、待清批次藏分支里
     def test_r8_purge_button_static_label(self):
         self.assertIn('QPushButton("一键删废节点")', _block(APP, 517, 517))
-        self.assertIn("if self._batch_waste:", _block(APP, 1267, 1267))
+        self.assertIn("if self._batch_waste:", _block(APP, 1305, 1305))
         # 反证：按钮文案从不动态更新
         self.assertNotIn("purge_btn.setText",
                          APP.read_text(encoding="utf-8"))
@@ -191,15 +190,15 @@ class TestNewAuditAnchors(DevTreeTestCase):
 
     # N1：健康三态前台全盲——探测/落地全在后台窗、后台窗从不 show、无转发
     def test_n1_health_probe_presentation_blind_on_frontend(self):
-        self.assertIn("def _maybe_health_probe(self):", _block(APP, 1399, 1399))
+        self.assertIn("def _maybe_health_probe(self):", _block(APP, 1437, 1437))
         self.assertIn("def _finish_health_probe(self, ok, payload):",
-                      _block(APP, 1433, 1433))
-        self.assertIn("if status == HEALTH_DEAD:", _block(APP, 1447, 1447))
-        self.assertIn("self._show_alert(text)", _block(APP, 1450, 1450))
-        self.assertIn("self.tray = None", _block(APP, 567, 567))
+                      _block(APP, 1471, 1471))
+        self.assertIn("if status == HEALTH_DEAD:", _block(APP, 1485, 1485))
+        self.assertIn("self._show_alert(text)", _block(APP, 1488, 1488))
+        self.assertIn("self.tray = None", _block(APP, 576, 576))
         self.assertIn("backend = MainWindow(store, orchestrator=usage.orchestrator,",
-                      _block(APP, 1847, 1847))
-        self.assertIn("usage.show()", _block(APP, 1862, 1862))
+                      _block(APP, 1885, 1885))
+        self.assertIn("usage.show()", _block(APP, 1900, 1900))
         self.assertIn("if self.orchestrator.state == Orchestrator.CONNECTED:",
                       _block(USAGE, 1317, 1317))
         self.assertIn("def _failover_alert(self, payload):",
@@ -279,7 +278,7 @@ class TestNewAuditAnchors(DevTreeTestCase):
         self.assertIn('self._show_alert(f"特殊站测试失败：{text}")',
                       _block(USAGE, 1473, 1473))
         self.assertIn('self._show_alert(f"测速失败：{text}")',
-                      _block(APP, 1596, 1596))
+                      _block(APP, 1634, 1634))
 
     # N10：0 样本满屏无引导、⑥区清单空无语义态（反证）
     def test_n10_no_data_dimension_guidance(self):
@@ -311,7 +310,7 @@ class TestNewAuditAnchors(DevTreeTestCase):
         self.assertIn('f"接管方式：{mode}。{actions}。下次连接生效。")',
                       _block(USAGE, 1246, 1246))
         self.assertIn('f"接管方式：{mode}。{actions}。下次连接生效。")',
-                      _block(APP, 1316, 1316))
+                      _block(APP, 1354, 1354))
         self.assertNotIn("currentText", USAGE.read_text(encoding="utf-8"))
         self.assertNotIn("currentText", APP.read_text(encoding="utf-8"))
 
@@ -349,7 +348,7 @@ class TestIronLawAnchors(DevTreeTestCase):
                         hits.append((py.name, i))
         self.assertEqual(
             sorted(hits),
-            [('app.py', 885), ('cli.py', 915), ('usage_window.py', 849)],
+            [('app.py', 895), ('cli.py', 924), ('usage_window.py', 849)],
             "orchestrator.connect 调用点应恰 3 处且全在用户点名路径")
 
     def test_failover_only_dead_nodes_group_only_no_live_switch(self):
@@ -363,16 +362,16 @@ class TestIronLawAnchors(DevTreeTestCase):
         self.assertNotIn(".sort(", text)
         self.assertNotIn("QTimer", text)    # 无定时器
         # suspect 分支不喂（后台窗 suspect 块内无 _failover_feed）
-        self.assertNotIn("_failover_feed", _block(APP, 1459, 1462))
-        self.assertIn("_failover_feed", _block(APP, 1454, 1458))
+        self.assertNotIn("_failover_feed", _block(APP, 1497, 1500))
+        self.assertIn("_failover_feed", _block(APP, 1492, 1496))
         self.assertIn("_failover_feed", _block(USAGE, 1401, 1403))
 
     def test_disclaim_auto_switch_copy(self):
         self.assertIn("不会自动切换", _block(ORCH, 160, 160))
-        self.assertIn("绝不自动换节点", _block(APP, 1448, 1449))
-        self.assertIn("不自动切换", _block(APP, 1461, 1461))
+        self.assertIn("绝不自动换节点", _block(APP, 1486, 1487))
+        self.assertIn("不自动切换", _block(APP, 1499, 1499))
         self.assertIn("只决定展示顺序", _block(HISTORY, 125, 125))
-        self.assertIn("只选中", _block(APP, 596, 611))
+        self.assertIn("只选中", _block(APP, 606, 621))
         self.assertIn("不连接、不切换任何节点", _block(USAGE, 857, 859))
 
 

@@ -6,7 +6,8 @@
 work12/DESIGN §5/§6 + §8-4/§8-5 的落地（模态对话框）：
 
 - 分组（§5.1）：连接·引擎入站 / 连接·规则与网络（UsageSettings 五项，
-  **唯一编辑入口** §6——使用界面③区只复用同一份值）/ 自动探测 / 数据。
+  **唯一编辑入口** §6——使用界面③区只复用同一份值）/ 自动探测 /
+  名单复查（task33 落页：list_recheck_days 编辑器）/ 数据。
 - 生效时机逐项标注（§5.3，不许含糊）：端口 / 规则五项 = 下次连接生效；
   自动探测 = 立即生效；数据目录 = 下次启动生效（不搬移旧数据）。
 - 危险项确认（§5.4）：
@@ -106,7 +107,7 @@ if _QT_OK:
         def __init__(self, settings: Settings, settings_store, parent=None):
             super().__init__(parent)
             self.setWindowTitle("设置")
-            self.resize(520, 560)
+            self.resize(520, 620)   # task33：+名单复查组，加高防裁保存行
             if not isinstance(settings, Settings):
                 raise SettingsError(
                     f"settings 必须是 Settings，得到 {type(settings).__name__}")
@@ -122,6 +123,7 @@ if _QT_OK:
             layout.addWidget(self._group_engine_ports())
             layout.addWidget(self._group_rules_network())
             layout.addWidget(self._group_auto_probe())
+            layout.addWidget(self._group_list_recheck())
             layout.addWidget(self._group_data())
             layout.addWidget(self.error_label)
 
@@ -205,6 +207,25 @@ if _QT_OK:
             form.addRow(note)
             return group
 
+        def _group_list_recheck(self) -> QGroupBox:
+            """名单复查组（task33 落页，销 work28 DONE §4-7 尾巴）：
+            list_recheck_days 编辑器。控件用可自由输入的行编辑而非
+            QSpinBox(2..7)——范围锁会在控件层静默夹取 1/8、拒收非数字
+            击键，简报红线「显式报错、不夹取、不静默改值」就不可达了；
+            真规则只在唯一事实源 core/list_recheck.validate_recheck_days
+            （保存期经 merge → Settings 校验原文报错），本页零复制。"""
+            group = QGroupBox("名单复查")
+            form = QFormLayout(group)
+            self.recheck_days_edit = QLineEdit()
+            self.recheck_days_edit.setPlaceholderText("2–7（默认 3）")
+            form.addRow("复查周期（天）", self.recheck_days_edit)
+            note = QLabel("生效时机：立即（下一轮复查按新周期判定）。"
+                          "默认 3 天，可调 2–7；越界或非整数保存时红字"
+                          "显式报错，不夹取、不静默改值。")
+            note.setWordWrap(True)
+            form.addRow(note)
+            return group
+
         def _group_data(self) -> QGroupBox:
             group = QGroupBox("数据")
             form = QFormLayout(group)
@@ -246,6 +267,8 @@ if _QT_OK:
             idx = self.interval_combo.findData(int(s.auto_probe_interval_min))
             if idx >= 0:
                 self.interval_combo.setCurrentIndex(idx)
+            # task33：名单复查周期编辑器（与其它字段同款装载）
+            self.recheck_days_edit.setText(str(int(s.list_recheck_days)))
             self.data_dir_edit.setText(s.data_dir)
             self.error_label.clear()
 
@@ -261,8 +284,22 @@ if _QT_OK:
                 "dns_server": self._dns_value(),
                 "auto_probe_enabled": self.auto_chk.isChecked(),
                 "auto_probe_interval_min": int(self.interval_combo.currentData()),
+                # task33：名单复查周期（解析形态见 _recheck_days_form_value；
+                # 越界/非整数由唯一校验器在 merge → Settings 保存期原文报错）
+                "list_recheck_days": self._recheck_days_form_value(),
                 "data_dir": self.data_dir_edit.text().strip(),
             }
+
+        def _recheck_days_form_value(self):
+            """周期控件文本 → int（可解析时）或原文本（不可解析时）。
+            刻意不做数值纠正/夹取：非整数原样交给唯一事实源
+            core/list_recheck.validate_recheck_days（经 merge → Settings
+            校验）以原文显式报错——本页不复制第二套规则文案。"""
+            raw = self.recheck_days_edit.text().strip()
+            try:
+                return int(raw)
+            except ValueError:
+                return raw
 
         def _dns_value(self) -> str:
             if self.dns_combo.currentData() == _DNS_CUSTOM:

@@ -537,20 +537,29 @@ if _QT_OK:
             self.batch_all_btn = QPushButton("一键全测")
             self.batch_all_btn.clicked.connect(lambda: self.toggle_batch_test(all_nodes=True))
             actions.addWidget(self.batch_all_btn)
-            # 名单复查（task28 / work10 §6.3/§6.4）：白名单视图与隔离区节点
-            # 每 list_recheck_days 天复查一次（默认 3，2–7）。手动按钮即跑
-            # 一轮；定时形态走 auto_timer 子周期（_maybe_recheck），默认关
-            # ——自动复查的默认开关是未解决项（由主会话另定），此开关只对
-            # 本窗口会话生效、不持久化。
+            # 名单复查（task28 / work10 §6.3/§6.4；task33 收尾）：白名单视图
+            # 与隔离区节点每 list_recheck_days 天复查一次（默认 3，2–7）。
+            # 手动按钮即跑一轮；定时形态走 auto_timer 子周期
+            # （_maybe_recheck），开关默认关（铁律口径同自动搜集：自动类
+            # 动作默认不开启）。勾选状态持久化进 settings.json
+            # （list_recheck_auto_enabled，task33 销 work28 §4-3 尾巴）：
+            # 初值读设置、用户拨动即经既有 settings 保存路径写回
+            # （_persist_recheck_switch），下次开窗按设置恢复。
             self.recheck_btn = QPushButton("复查名单")
             self.recheck_btn.clicked.connect(self.recheck_now)
             actions.addWidget(self.recheck_btn)
             self.recheck_chk = QCheckBox("定时复查")
-            self.recheck_chk.setChecked(False)
+            # 初值来自设置（task33）；先设初值再接信号——启动恢复不落盘
+            # （「启动恢复不算用户改动」，与 _load_auto_settings 同口径）。
+            self.recheck_chk.setChecked(
+                bool(self.settings.list_recheck_auto_enabled))
+            self.recheck_chk.toggled.connect(
+                self._on_recheck_setting_changed)
             self.recheck_chk.setToolTip(
-                "按设置 list_recheck_days（默认 3 天，可调 2–7）的周期，挂在"
-                "自动探测定时器子周期里检查到期对象并复查。默认关：自动复查"
-                "的默认开关待定，此开关只对本次窗口生效、不持久化。")
+                "按设置 list_recheck_days（默认 3 天，可调 2–7，设置页可改）"
+                "的周期，挂在自动探测定时器子周期里检查到期对象并复查。"
+                "默认关；勾选状态持久化进设置（list_recheck_auto_enabled），"
+                "下次开窗沿用。")
             actions.addWidget(self.recheck_chk)
             refresh_btn = QPushButton("刷新")
             refresh_btn.clicked.connect(self.refresh_pages)
@@ -572,7 +581,8 @@ if _QT_OK:
             self.auto_timer = QTimer(self)
             self.auto_timer.timeout.connect(self._maybe_auto_probe)
             # task28：定时名单复查挂同一 auto_timer 子周期（_maybe_recheck
-            # 首行守卫默认关直返；不新增定时器）。
+            # 首行守卫开关关直返；不新增定时器。task33：开关状态持久化进
+            # settings，初值恢复见创建点）。
             self.auto_timer.timeout.connect(self._maybe_recheck)
             # task31：自动搜集第二只定时器——同一位置、同一 _apply_* 刷新
             # 口径挂第二只 QTimer，不另起第二套调度实现（后台执行复用
@@ -1122,10 +1132,38 @@ if _QT_OK:
                 return
             self._run_task("recheck", self._run_recheck_once)
 
+        def _on_recheck_setting_changed(self, *_):
+            """定时复查开关变了：落盘（task24 §8-7 立即生效同款接线点）。
+            复查挂 auto_timer 子周期、无独立定时器，无需重设——只写值。"""
+            self._persist_recheck_switch()
+
+        def _persist_recheck_switch(self):
+            """定时复查开关 → settings.json（task33 销 work28 DONE §4-3
+            尾巴：开关不再「关窗就忘」）。唯一落盘点 = 既有 settings 保存
+            路径（merge → SettingsStore.save，与 _persist_auto_probe 同款，
+            不新造通道）。程序化同步控件期间跳过（对话框已保存，避免重复
+            写）；无 settings_store（离线测试替身形态）跳过落盘；IO 失败
+            显式告警，不静默吞。
+            单一事实源裁决（task33 简报二选一）：**与控件状态保持单一
+            事实源**——控件初值来自设置、用户拨动即写回，_maybe_recheck
+            首行守卫照旧读控件；设置页不载此开关（DESIGN §2.3），会话内
+            无第二写入方，不存在分叉窗口。"""
+            if self.settings_store is None or self._applying_settings:
+                return
+            self.settings = merge(self.settings, {
+                "list_recheck_auto_enabled":
+                    self.recheck_chk.isChecked()})
+            try:
+                self.settings_store.save(self.settings)
+            except OSError as exc:
+                self._show_alert(f"设置保存失败：{exc}")
+
         def _maybe_recheck(self):
             """定时复查入口（auto_timer 子周期，与自动探测同款守卫：忙时
-            不跑）。默认关（自动复查默认开关是未解决项；此开关不持久化，
-            只对当前窗口会话生效）。守卫全过且确有到期对象才开一轮；与
+            不跑）。开关默认关（铁律：自动类动作默认不开启；task33 起勾选
+            状态持久化进 settings.list_recheck_auto_enabled，判断的单一
+            事实源 = 控件状态——初值来自设置、拨动即写回，见
+            _persist_recheck_switch）。守卫全过且确有到期对象才开一轮；与
             自动探测共用 10828/10829 端口对，双方互斥（_maybe_auto_probe
             亦查 _recheck_active）。"""
             if not self.recheck_chk.isChecked():

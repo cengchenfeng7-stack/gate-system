@@ -24,14 +24,15 @@ task12 原型（§3/§4 定稿口径）的集成落地。与原型的差别（DE
 
 不变（原型既定口径）：`Settings` frozen dataclass（原型 10 字段，task19
 扩 speedtest_payload_url、task28 扩 list_recheck_days、task31 扩自动搜集
-五项后共 17）、默认值 =
+五项、task33 扩 list_recheck_auto_enabled 后共 18）、默认值 =
 现行行为、to_dict / from_dict（缺字段补默认、未知键抛错）/ merge
 （只覆盖显式字段）/ usage_dict；非法值一律 `SettingsError(ValueError)`
 ——报错不静默吞、不静默纠正。
 
 依赖口径（从原型放宽，集成后必然）：允许 `from .usage_model import`；
-U4/task19 扩展位：`speedtest_payload_url`（测速载荷地址，默认空槽；
-校验单一事实源 = core/speedtest.validate_payload_url，与实测器同用一份）；
+U4/task19 扩展位：`speedtest_payload_url`（测速载荷地址，task35 核定默认
+= cachefly 验活地址，用户显式值优先；校验单一事实源 =
+core/speedtest.validate_payload_url，与实测器同用一份）；
 持久化只用标准库（json/os/tempfile/time）；不依赖 PySide6（迁移经
 reader 注入）；不碰网络。无任何节点语义——设置只管配置本身，铁律：
 **永不自动切换节点**。
@@ -199,11 +200,21 @@ class Settings:
     # 主人 2026-11-22 04:29 定「每几天复查探查一次」；校验单一事实源 =
     # core/list_recheck.validate_recheck_days（越界显式报错，不静默夹取）。
     list_recheck_days: int = 3
+    # —— 名单复查定时开关（task33 收尾，销 work28 DONE §4-3 尾巴）：GUI
+    # 「定时复查」开关的持久化事实源，与 list_recheck_days 同一份设置。
+    # 默认关（铁律口径同 auto_collect_enabled：自动类动作默认不开启——
+    # 复查虽只读+提示，定时自跑仍属「客户端自己动」）；GUI 开关初值读
+    # 这里、用户拨动即写回（ui/app.py _persist_recheck_switch，既有
+    # settings 保存路径），关窗重开不再忘。
+    list_recheck_auto_enabled: bool = False
     # —— U4 扩展位：测速载荷地址（task19 / work10 §10、§13-G） ——
-    # 默认空 = 未配置（客户端不内置地址，主人在设置页核定填入）；
-    # 非空只认 http(s) 形态，校验单一事实源 = core/speedtest
+    # task35 核定默认：cachefly 大文件地址（主会话给定候选逐个实测——
+    # cloudflare 超时、cachefly 200 + Content-Length 100 MB，验活记录见
+    # work35/source-verification.md）；此前 task19 口径「默认空槽、主人
+    # 核定后填入」由本段落定。用户仍可在设置侧改（显式值优先——merge
+    # 既有语义）；非空只认 http(s) 形态，校验单一事实源 = core/speedtest
     # .validate_payload_url（实测器同用一份，两处口径不打架）。
-    speedtest_payload_url: str = ""
+    speedtest_payload_url: str = "https://cachefly.cachefly.net/100mb.test"
     # —— 应用层：自动搜集（task31 定稿；依据逐项见 work31 DESIGN §2） ——
     # 铁律：开关默认关——不经主人点头，客户端不许自己联网拉新节点。
     # auto_collect_enabled 只控制「GUI 定时器是否到点自动跑一轮搜集」，
@@ -259,6 +270,9 @@ class Settings:
             validate_recheck_days(self.list_recheck_days)
         except ValueError as exc:
             raise SettingsError(str(exc)) from exc
+        # 名单复查定时开关（task33）：严格布尔，0/1 冒充拒收（同款口径）。
+        _require_bool("list_recheck_auto_enabled",
+                      self.list_recheck_auto_enabled)
         # U4 扩展位（task19）：载荷地址空 = 未配置（合法默认）；非空
         # 只认 http(s) 形态（校验器与实测器同源，见模块 docstring）。
         # 校验失败换 SettingsError 抛——设置层的错归设置层错误族。
@@ -296,6 +310,7 @@ class Settings:
             "auto_probe_enabled": self.auto_probe_enabled,
             "auto_probe_interval_min": self.auto_probe_interval_min,
             "list_recheck_days": self.list_recheck_days,
+            "list_recheck_auto_enabled": self.list_recheck_auto_enabled,
             "speedtest_payload_url": self.speedtest_payload_url,
             "auto_collect_enabled": self.auto_collect_enabled,
             "collect_interval_min": self.collect_interval_min,

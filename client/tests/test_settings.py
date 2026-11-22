@@ -330,6 +330,9 @@ class TestParityWithUsageSettings(unittest.TestCase):
                           # task28 扩展位：名单复查周期（work10 §6.3，
                           # 默认 3 天可调 2–7；随 Settings 字段增加机械平移）
                           "list_recheck_days",
+                          # task33 扩展位：名单复查定时开关（销 work28
+                          # DONE §4-3 尾巴；随 Settings 字段增加机械平移）
+                          "list_recheck_auto_enabled",
                           # task31 扩展位：自动搜集门槛与开关五项（work31
                           # DESIGN §2/§5；随 Settings 字段增加机械平移）
                           "auto_collect_enabled", "collect_interval_min",
