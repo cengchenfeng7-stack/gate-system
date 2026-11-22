@@ -26,17 +26,22 @@ import os
 import sys
 
 from ..core import history
+from ..core.health import (check_ports_free, describe_occupied,
+                           proxy_conflict, read_system_proxy)
 from ..core.model import SCENES, SOURCES
 from ..core.orchestrator import Orchestrator, OrchestratorError
 from ..core.store import Store
 from ..core.verify import apply_outcome, make_real_probe, verify_exit
 from ..engines.openvpn_engine import OpenVPNEngine
-from ..engines.singbox_engine import SINGBOX_PROTOCOLS, SingBoxEngine
+from ..engines.singbox_engine import (DEFAULT_HTTP_PORT, DEFAULT_SOCKS_PORT,
+                                      SINGBOX_PROTOCOLS, SingBoxEngine)
 from ..sources import feed as feed_src
 from ..sources import format_import as format_src
 from ..sources import manual as manual_src
 from ..sources import pipeline as pipeline_src
+from ..sources import source_registry as registry_src
 from ..sources import subscription as subscription_src
+from urllib.parse import urlsplit
 
 DEFAULT_DB = os.environ.get(
     "GATE_CLIENT_DB",
@@ -111,9 +116,82 @@ def cmd_import_subscription(store: Store, args, fetcher=None) -> int:
         return _err("没有解析出任何节点（检查订阅内容或格式；"
                     "sing-box JSON 暂不支持）")
     store.upsert_nodes(res.nodes)
+    if args.url:
+        # 订阅地址导入即登记：下次一键更新不用再贴地址；已登记过不重复报错。
+        try:
+            _registry(store).register("subscription", args.url,
+                                      args.name or "")
+        except ValueError:
+            pass
     print(f"已收纳 {len(res.nodes)} 个节点（跳过坏行 {res.skipped}，"
           f"格式 {res.format}，库内共 {store.count_nodes()} 个）")
     return 0
+
+
+def _registry_path(store: Store) -> str:
+    """登记表位置：与节点库同目录的 sources.json（GUI/CLI 共用同一份）。"""
+    return os.path.join(
+        os.path.dirname(os.path.abspath(store.path or "client.db")),
+        "sources.json")
+
+
+def _registry(store: Store):
+    return registry_src.SourceRegistry(_registry_path(store))
+
+
+def cmd_sources(store: Store, args, fetcher=None) -> int:
+    """来源登记命令：list/add/update/update-all/remove/enable/disable。
+    fetcher 为测试注入点（默认真联网拉取）。"""
+    reg = _registry(store)
+    if args.sources_cmd == "list":
+        entries = reg.entries()
+        if not entries:
+            print("未登记任何来源")
+            return 0
+        for e in entries:
+            host = urlsplit(e["address"]).netloc or "（官方默认）"
+            lu = reg.last_update(e["id"])
+            lu_txt = ("未更新过" if not lu
+                      else ("成功" if lu.get("ok")
+                            else f"失败：{lu.get('error', '')}"))
+            print(f"{e['id']} [{e['type']}/{e['page']}] "
+                  f"{e['name'] or '（未命名）'} · {host} · "
+                  f"{'启用' if e['enabled'] else '停用'} · 上次：{lu_txt}")
+        return 0
+    if args.sources_cmd == "add":
+        try:
+            entry = reg.register(args.type, args.address or "",
+                                 args.name or "")
+        except ValueError as exc:
+            return _err(str(exc))
+        print(f"已登记 {entry['id']}（{entry['type']}）")
+        return 0
+    if args.sources_cmd in ("update", "update-all"):
+        if args.sources_cmd == "update":
+            if not reg.get(args.entry_id):
+                return _err(f"未登记的来源: {args.entry_id}")
+            reports = [registry_src.update_entry(
+                reg, store, args.entry_id, fetch_fn=fetcher)]
+        else:
+            reports = registry_src.update_all(reg, store, fetch_fn=fetcher)
+        for rep in reports:
+            print(f"{rep.entry_id}：{rep.summary()}")
+        return 0 if all(r.ok for r in reports) else 1
+    if args.sources_cmd == "remove":
+        if reg.remove(args.entry_id):
+            print(f"已删除登记 {args.entry_id}（节点不动）")
+        else:
+            print(f"未登记的来源: {args.entry_id}")
+        return 0
+    if args.sources_cmd in ("enable", "disable"):
+        try:
+            reg.set_enabled(args.entry_id, args.sources_cmd == "enable")
+        except ValueError as exc:
+            return _err(str(exc))
+        print(f"已{'启用' if args.sources_cmd == 'enable' else '停用'} "
+              f"{args.entry_id}")
+        return 0
+    return _err(f"未知 sources 子命令: {args.sources_cmd}")
 
 
 def cmd_list(store: Store, args) -> int:
@@ -218,6 +296,32 @@ def cmd_connect(store: Store, args, probe_factory, engine_factory=None) -> int:
         print(f"⚠ 该节点已被标记为污染节点（{node.extra.get('quarantine_reason', '')}），"
               "仍按你的点名连接。")
     orch = _build_orchestrator(store, probe_factory, engine_factory)
+    # 接管方式（task6）：CLI 每次连接显式给 --mode；默认 proxy（现行）。
+    # tun 模式下引擎 start() 会先过提权前提检查——提权启动器未实现时
+    # 显式报错（退出码 1，经 orchestrator 的 error 事件），不静默回退。
+    if node is not None:
+        engine = orch.engines.get(node.protocol)
+        if isinstance(engine, SingBoxEngine):
+            engine.takeover_mode = getattr(args, "mode", "proxy") or "proxy"
+    # 健康预检（task5）：①端口被占 → 报错退出码 2，不发起注定失败的连接；
+    # ②系统代理冲突 → 只警告一行，照常连接（用户点名优先）。
+    if node is not None:
+        engine = orch.engines.get(node.protocol)
+        if isinstance(engine, SingBoxEngine):
+            occupied = check_ports_free((engine.socks_port, engine.http_port))
+            if occupied:
+                return _err(
+                    f"引擎端口被占用，启动被挡：{describe_occupied(occupied)}。"
+                    "关掉占用它的程序（其他代理软件？）或改它的端口，再重试。")
+            our_port = engine.http_port
+        else:
+            # OpenVPN 是 TUN 模式、不占 7897/7898：只查②，参照端口仍用
+            # 本客户端引擎端口。
+            our_port = DEFAULT_HTTP_PORT
+        conflict = proxy_conflict(read_system_proxy(), our_port)
+        if conflict["conflict"]:
+            print(f"[警告] {conflict['reason']}客户端不会改你的系统代理，"
+                  "也不会切换节点。")
     try:
         ev = orch.connect(args.node_id)
     except OrchestratorError as exc:
@@ -249,8 +353,26 @@ def cmd_restore_names(store: Store, args) -> int:
 def cmd_status(store: Store, args) -> int:
     total = store.count_nodes()
     print(f"节点库: {total} 个节点（db={store.path}）")
+    # 一次性体检（task5）：引擎端口占用 + 系统代理指向判读。
+    occupied = {item["port"]: item for item in
+                check_ports_free((DEFAULT_HTTP_PORT, DEFAULT_SOCKS_PORT))}
+    for port, label in ((DEFAULT_HTTP_PORT, "HTTP 入站"),
+                        (DEFAULT_SOCKS_PORT, "SOCKS 入站")):
+        item = occupied.get(port)
+        if item is None:
+            print(f"端口 {port}（{label}）：空闲")
+        else:
+            print(f"端口 {port}（{label}）：{describe_occupied([item])}")
+    sysproxy = read_system_proxy()
+    if not sysproxy.get("available"):
+        print(f"系统代理：读不到（{sysproxy.get('error') or '未知原因'}）")
+    else:
+        print(f"系统代理：{proxy_conflict(sysproxy, DEFAULT_HTTP_PORT)['reason']}")
     print("会话: CLI 为单次命令形态，常驻会话状态在 M3 托盘提供；"
           "connect 命令在本进程内完成 引擎启动+验出口 全流程校验。")
+    print("接管方式: 默认系统代理（proxy）；TUN 模式（connect --mode tun）"
+          "配置生成已就绪，提权启动器（pkexec + root wrapper）待真机实现，"
+          "当前版本会显式报错、不会静默回退。")
     return 0
 
 
@@ -291,10 +413,31 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("connect", help="连接指定节点（显式点选，绝不自动切换）")
     p.add_argument("node_id")
+    p.add_argument("--mode", choices=["proxy", "tun"], default="proxy",
+                   help="接管方式：proxy=系统代理（默认），tun=TUN 接管全机流量"
+                        "（提权启动器未实现时显式报错，不静默回退）")
 
     sub.add_parser("disconnect", help="断开（CLI 形态下无常驻会话，仅提示）")
     sub.add_parser("restore-names", help="把按实测出口改名的节点恢复原名")
     sub.add_parser("status", help="查看节点库与会话说明")
+
+    p = sub.add_parser("sources", help="来源登记：登记可续期的订阅/feed，一键更新")
+    sp = p.add_subparsers(dest="sources_cmd", required=True)
+    sp.add_parser("list", help="列出已登记来源（地址只显示域名，不回显全址）")
+    p_add = sp.add_parser("add", help="登记一个来源")
+    p_add.add_argument("--type", choices=["subscription", "feed", "feed_mirror"],
+                       required=True)
+    p_add.add_argument("--address", help="订阅/feed 地址（feed 可留空用官方默认）")
+    p_add.add_argument("--name", help="来源名（可选）")
+    p_up = sp.add_parser("update", help="更新一条已登记来源（真联网拉取）")
+    p_up.add_argument("entry_id")
+    sp.add_parser("update-all", help="更新全部已启用的登记来源（真联网拉取）")
+    p_rm = sp.add_parser("remove", help="删除一条登记（节点不动）")
+    p_rm.add_argument("entry_id")
+    p_en = sp.add_parser("enable", help="启用一条登记")
+    p_en.add_argument("entry_id")
+    p_dis = sp.add_parser("disable", help="停用一条登记")
+    p_dis.add_argument("entry_id")
     return ap
 
 
@@ -325,6 +468,8 @@ def main(argv=None, probe_factory=None, engine_factory=None, fetcher=None) -> in
             return cmd_restore_names(store, args)
         if args.cmd == "status":
             return cmd_status(store, args)
+        if args.cmd == "sources":
+            return cmd_sources(store, args, fetcher=fetcher)
         return _err(f"未知命令: {args.cmd}")
     finally:
         store.close()

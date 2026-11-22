@@ -28,18 +28,27 @@ import argparse
 import os
 import sys
 import time
+from collections import deque
 
 from ..core import history
+from ..core.health import (HEALTH_DEAD, HEALTH_SUSPECT, check_ports_free,
+                           check_tun_takeover, connection_health_detail,
+                           describe_occupied, proxy_conflict,
+                           read_system_proxy)
+from ..core.tun_config import MODES, mode_plan
 from ..core.model import SCENES, SOURCE_LABELS, SOURCES
 from ..core.orchestrator import Orchestrator, OrchestratorError
 from ..core.store import Store
-from ..core.verify import apply_outcome, make_real_probe, verify_exit
+from ..core.verify import (apply_outcome, make_real_probe, pollution_of,
+                           verify_exit)
 from ..engines.base import EngineError
-from ..engines.singbox_engine import SINGBOX_PROTOCOLS, SingBoxEngine
+from ..engines.singbox_engine import (DEFAULT_HTTP_PORT, SINGBOX_PROTOCOLS,
+                                      SingBoxEngine)
 from ..sources import feed as feed_src
 from ..sources import format_import as format_src
 from ..sources import manual as manual_src
 from ..sources import pipeline as pipeline_src
+from ..sources import source_registry as registry_src
 from ..sources import subscription as subscription_src
 from .cli import DEFAULT_DB, _build_orchestrator
 
@@ -129,7 +138,8 @@ try:
     from PySide6.QtCore import QObject, QSettings, QThread, QTimer, Qt, Signal
     from PySide6.QtGui import QAction, QColor, QIcon, QPixmap
     from PySide6.QtWidgets import (
-        QApplication, QCheckBox, QComboBox, QFileDialog, QHBoxLayout,
+        QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog,
+        QHBoxLayout,
         QHeaderView, QInputDialog, QLabel, QMainWindow, QMessageBox, QPushButton,
         QSystemTrayIcon, QTabWidget, QTableWidget, QTableWidgetItem,
         QMenu, QVBoxLayout, QWidget,
@@ -213,6 +223,7 @@ if _QT_OK:
             self.table = QTableWidget(0, len(self.COLUMNS))
             self.table.setHorizontalHeaderLabels(self.COLUMNS)
             self.table.setSelectionBehavior(QTableWidget.SelectRows)
+            self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
             self.table.setEditTriggers(QTableWidget.NoEditTriggers)
             header = self.table.horizontalHeader()
             header.setSectionResizeMode(0, QHeaderView.Stretch)  # 名称列吃满余宽
@@ -226,15 +237,20 @@ if _QT_OK:
             """每个来源页只给属于自己的导入入口（来源即归属）。"""
             w = self.window
             if self.source == "openvpn":
-                return [("导入 .ovpn", w.import_ovpn_files)]
+                return [("导入 .ovpn", w.import_ovpn_files),
+                        ("登记 feed 镜像", w.register_feed_mirror),
+                        ("更新已登记来源", w.update_registered_sources)]
             if self.source == "vpngate_feed":
-                return [("导入 feed 文件", w.import_feed_file)]
+                return [("导入 feed 文件", w.import_feed_file),
+                        ("登记并更新 feed", w.register_and_update_feed),
+                        ("更新已登记来源", w.update_registered_sources)]
             if self.source == "pipeline":
                 return [("导入 data.json", w.import_pipeline_data),
                         ("导入 nodes 文本", w.import_pipeline_nodes)]
             return [("粘贴链接", w.import_links_text),
                     ("导入订阅文件", w.import_subscription_file),
-                    ("订阅地址导入", w.import_subscription_url)]
+                    ("订阅地址导入", w.import_subscription_url),
+                    ("更新已登记来源", w.update_registered_sources)]
 
         def selected_node_id(self):
             row = self.table.currentRow()
@@ -242,6 +258,15 @@ if _QT_OK:
                 return None
             item = self.table.item(row, 0)
             return item.data(Qt.UserRole) if item else None
+
+        def selected_node_ids(self):
+            """多选中的全部节点 id（Ctrl/Shift 多选）。"""
+            ids = []
+            for idx in self.table.selectionModel().selectedRows():
+                item = self.table.item(idx.row(), 0)
+                if item:
+                    ids.append(item.data(Qt.UserRole))
+            return ids
 
         def select_node(self, node_id):
             """按节点 id 选中对应行（启动恢复上次节点用）。找到返回 True。"""
@@ -312,8 +337,15 @@ if _QT_OK:
             self._busy = False
             self._batch_active = False
             self._batch_stop = False
+            self._batch_waste = []      # 上一轮批量测出的废节点（待一键删）
             self._auto_active = False    # 自动探测一轮在跑（不占 _busy）
             self._auto_cursor = 0        # 未测/失败节点的轮扫游标
+            self._health_samples = deque(maxlen=10)  # 健康探测样本（当前连接）
+            self._health_active = False    # 健康探测一轮在跑（不占 _busy）
+            self._sysproxy_active = False  # 系统代理复查一轮在跑（不占 _busy）
+            self._health_tick = 0          # poll_once 滴答计数（3 tick≈15s 探测）
+            self._sysproxy_alert = False   # 告警条当前是否在亮系统代理冲突
+            self._tun_alert = False        # 告警条当前是否在亮 TUN 接管未生效
 
             if orchestrator is not None:
                 self.orchestrator = orchestrator
@@ -373,6 +405,18 @@ if _QT_OK:
             self.disconnect_btn = QPushButton("断开")
             self.disconnect_btn.clicked.connect(self.disconnect)
             actions.addWidget(self.disconnect_btn)
+            # 接管方式（task6/DESIGN §2.2）：只在未连接时可切（CONNECTED 时
+            # 禁用，见 _update_action_states）；切换=改引擎实例属性，下次
+            # 连接生效。TUN 需系统授权，提权启动器待真机实现。
+            self.mode_combo = QComboBox()
+            self.mode_combo.addItem("系统代理", "proxy")
+            self.mode_combo.addItem("TUN 接管全机", "tun")
+            self.mode_combo.setToolTip(
+                "接管方式：只在未连接时可切换，切换后下次连接生效。"
+                "TUN 接管全机流量，首次开启会弹系统授权框；提权启动器待"
+                "真机实现，当前版本选 TUN 点连接会显式报错。")
+            self.mode_combo.currentIndexChanged.connect(self._on_mode_changed)
+            actions.addWidget(self.mode_combo)
             self.verify_btn = QPushButton("测速验出口")
             self.verify_btn.clicked.connect(self.verify_selected)
             actions.addWidget(self.verify_btn)
@@ -385,6 +429,9 @@ if _QT_OK:
             self.delete_btn = QPushButton("删除")
             self.delete_btn.clicked.connect(self.delete_selected)
             actions.addWidget(self.delete_btn)
+            self.purge_btn = QPushButton("一键删废节点")
+            self.purge_btn.clicked.connect(self.purge_waste_selected_page)
+            actions.addWidget(self.purge_btn)
             actions.addStretch(1)
             # 自动探测开关 + 间隔（2026-11-21 需求：后台定时测延迟，
             # 能用的节点一直排在前面）。设置经 QSettings 持久化。
@@ -421,6 +468,7 @@ if _QT_OK:
 
             self.refresh_pages()
             self._restore_last_node()
+            self._startup_health_check()
             self._update_action_states()
 
         # ---------------- 上次节点恢复 ----------------
@@ -570,11 +618,21 @@ if _QT_OK:
                 self._show_info("先在当前页选中一个节点，再点连接。")
                 return
             self._clear_alert()
+            self._sysproxy_alert = False
             if node.extra.get("quarantined") == "1":
                 # 与 CLI 同口径：警告但不阻断（用户点名即视为知情）
                 self._show_alert(
                     f"⚠ 该节点已被标记为污染节点"
                     f"（{node.extra.get('quarantine_reason', '')}），仍按你的点名连接。")
+            # 健康预检（task5）：①端口被占 → 取消本次连接；②系统代理冲突 →
+            # 只告警、照常连接（用户点名优先）。False=取消本次连接。
+            if not self._health_precheck(node):
+                return
+            # 接管方式（task6）：连接前把控件当前模式写进引擎实例属性
+            # （IDLE 才可改，控件在 CONNECTED 时禁用）；OpenVPN 不走此引擎。
+            engine = self.engines.get(node.protocol)
+            if isinstance(engine, SingBoxEngine):
+                engine.takeover_mode = self.mode_combo.currentData()
             orch = self.orchestrator
             self._run_task("connect", lambda: orch.connect(node.id))
 
@@ -685,10 +743,12 @@ if _QT_OK:
                 return
             self._batch_stop = False
             self._batch_active = True
+            self._batch_waste = []
             self._run_task("batch", lambda: self._run_batch(ids, label))
 
         def _run_batch(self, ids, label="本页"):
             ok_n = fail_n = skip_n = done = 0
+            fail_ids, dirty_ids = [], []
             total = len(ids)
             for nid in ids:
                 if self._batch_stop:
@@ -701,14 +761,20 @@ if _QT_OK:
                 done += 1
                 if kind == "verify_ok":
                     ok_n += 1
+                    node = self.store.get_node(nid)
+                    if (node is not None and node.exit_profile is not None
+                            and pollution_of(node.exit_profile)[0]):
+                        dirty_ids.append(nid)
                 elif kind == "skip":
                     skip_n += 1
                 else:
                     fail_n += 1
+                    fail_ids.append(nid)
                 self.bridge.progress.emit(
                     f"测速中 {done}/{total}：可连 {ok_n} · 不通 {fail_n}"
                     f" · 跳过 {skip_n}")
-            return ("batch_done", ok_n, fail_n, skip_n, done, total, label)
+            return ("batch_done", ok_n, fail_n, skip_n, done, total, label,
+                    fail_ids, dirty_ids)
 
         # ---------------- 自动探测（定时后台测延迟，可用节点自动浮顶） ----------------
         def _maybe_auto_probe(self):
@@ -785,19 +851,33 @@ if _QT_OK:
                 self.refresh_pages()
 
         def delete_selected(self):
-            """删除选中节点：连接中的先拦，删前弹确认（删了恢复不了）。"""
-            node = self.selected_node()
-            if node is None:
+            """删除选中节点（支持多选）：连接中的跳过，删前一次确认。"""
+            page = self.current_page()
+            ids = page.selected_node_ids() if page else []
+            if not ids:
+                node = self.selected_node()
+                ids = [node.id] if node else []
+            if not ids:
                 return
-            if self.orchestrator.active_node_id == node.id:
-                self._show_alert("这个节点正在连接中，先断开再删")
+            active = self.orchestrator.active_node_id
+            if active in ids:
+                self._show_alert("正在连接的节点已跳过，先断开才能删它")
+                ids = [i for i in ids if i != active]
+            if not ids:
                 return
-            ok = QMessageBox.question(
-                self, "删除节点",
-                f"确定删除「{node.name}」？\n连同它的测速记录一起删，删了恢复不了。")
+            if len(ids) == 1:
+                node = self.store.get_node(ids[0])
+                name = node.name if node else ids[0]
+                text = (f"确定删除「{name}」？\n"
+                        "连同它的测速记录一起删，删了恢复不了。")
+            else:
+                text = (f"确定删除选中的 {len(ids)} 个节点？\n"
+                        "连同它们的测速记录一起删，删了恢复不了。")
+            ok = QMessageBox.question(self, "删除节点", text)
             if ok != QMessageBox.Yes:
                 return
-            self.delete_node_by_id(node.id)
+            n = self.delete_nodes_by_ids(ids)
+            self._show_info(f"已删除 {n} 个节点")
 
         def delete_node_by_id(self, node_id: str) -> bool:
             """删除节点并刷新界面（与确认对话框分离，便于离线测试）。"""
@@ -806,10 +886,283 @@ if _QT_OK:
                 self.refresh_pages()
             return gone
 
+        def delete_nodes_by_ids(self, node_ids) -> int:
+            """批量删除（与确认对话框分离，便于离线测试）。返回实删个数。"""
+            n = 0
+            for nid in node_ids:
+                if self.store.delete_node(nid):
+                    n += 1
+            if n:
+                self.refresh_pages()
+            return n
+
+        def waste_node_ids(self, source):
+            """本页的废节点 (不通, 污染)：不通 = 最近一次验真失败；
+            污染 = 隔离标记或出口情报带污染。拉黑的不算（用户已处置）。"""
+            dead, dirty = [], []
+            for node in self.store.list_nodes(source=source,
+                                              include_banned=False):
+                polluted = node.extra.get("quarantined") == "1"
+                if not polluted and node.exit_profile is not None:
+                    polluted = pollution_of(node.exit_profile)[0]
+                if polluted:
+                    dirty.append(node.id)
+                    continue
+                last = history.last_result(self.store, node.id)
+                if last is not None and not last[0]:
+                    dead.append(node.id)
+            return dead, dirty
+
+        def purge_waste_on_page(self, source) -> int:
+            """一键删废节点（与确认分离）：删本页不通+污染，连接中的跳过。"""
+            dead, dirty = self.waste_node_ids(source)
+            ids = [i for i in dead + dirty
+                   if i != self.orchestrator.active_node_id]
+            return self.delete_nodes_by_ids(ids)
+
+        def purge_batch_waste(self) -> int:
+            """删上一轮批量测出的废节点（与确认分离，便于离线测试）。"""
+            ids = [i for i in self._batch_waste
+                   if i != self.orchestrator.active_node_id]
+            self._batch_waste = []
+            return self.delete_nodes_by_ids(ids)
+
+        def purge_waste_selected_page(self):
+            """「一键删废节点」：优先清上一轮批量测出的那批；没有待清
+            批次时清当前页的废节点。先报数，确认后删。"""
+            if self._batch_waste:
+                ok = QMessageBox.question(
+                    self, "一键删废节点",
+                    f"上一轮批量测出 {len(self._batch_waste)} 个废节点。\n"
+                    "确定一键删除？连同测速记录一起删，删了恢复不了。")
+                if ok != QMessageBox.Yes:
+                    return
+                n = self.purge_batch_waste()
+                self._show_info(f"已删除 {n} 个废节点")
+                return
+            page = self.current_page()
+            if page is None:
+                return
+            dead, dirty = self.waste_node_ids(page.source)
+            if not dead and not dirty:
+                self._show_info("本页没有测出不通或污染的节点")
+                return
+            ok = QMessageBox.question(
+                self, "一键删废节点",
+                f"本页有 {len(dead)} 个不通、{len(dirty)} 个污染节点。\n"
+                "确定一键删除？连同测速记录一起删，删了恢复不了。")
+            if ok != QMessageBox.Yes:
+                return
+            n = self.purge_waste_on_page(page.source)
+            self._show_info(f"已删除 {n} 个废节点")
+
+        # ---------------- 连接健康三件套（task5） ----------------
+        def _takeover_mode(self) -> str:
+            """当前接管方式：sing-box 引擎实例属性为准（IDLE 时与模式控件
+            同步，CONNECTED 时控件禁用、属性即连接中的模式）。无 sing-box
+            引擎时默认 proxy。"""
+            engine = next((e for e in self.engines.values()
+                           if isinstance(e, SingBoxEngine)), None)
+            if engine is None:
+                return "proxy"
+            return getattr(engine, "takeover_mode", "proxy") or "proxy"
+
+        def _on_mode_changed(self, _index):
+            """模式控件切换：立即同步到引擎实例属性，并提示该模式的系统侧
+            动作（mode_plan 纯数据）。切换本身不连接、不改节点（铁律）。"""
+            mode = self.mode_combo.currentData()
+            if mode not in MODES:
+                return
+            engine = next((e for e in self.engines.values()
+                           if isinstance(e, SingBoxEngine)), None)
+            if engine is not None:
+                engine.takeover_mode = mode
+            plan = mode_plan(mode)
+            actions = "；".join(a["action"] for a in plan["system_actions"])
+            self._show_info(f"接管方式：{mode}。{actions}。下次连接生效。")
+
+        def _sysproxy_conflict_text(self, reason: str) -> str:
+            """检测②冲突文案：TUN 模式换装（task6/DESIGN §6.2）——回环流量
+            不经 tun，系统代理指到别家仍是真冲突；proxy 模式沿用原口径。"""
+            if self._takeover_mode() == "tun":
+                return (f"TUN 已接管全机流量，但{reason}——走系统代理的"
+                        "应用流量到不了隧道。客户端不会改你的系统代理。")
+            return reason
+
+        def _health_precheck(self, node) -> bool:
+            """连接前预检（检测①+②）：False=取消本次连接，True=继续。
+
+            ①引擎端口被占 → 告警条并取消连接（引擎横竖起不来）；
+            ②系统代理冲突 → 告警条但照常连接（用户点名优先，只提示不拦）。
+            OpenVPN 是 TUN 模式、不占 7897/7898：只查②，参照端口仍用
+            本客户端引擎端口。"""
+            engine = self.engines.get(node.protocol)
+            if isinstance(engine, SingBoxEngine):
+                occupied = check_ports_free((engine.socks_port, engine.http_port))
+                if occupied:
+                    self._show_alert(
+                        f"启动被挡：{describe_occupied(occupied)}。引擎起不来——"
+                        "关掉占用它的程序（其他代理软件？）或改它的端口，再点一次连接。"
+                        "客户端不会动你的系统设置，也不会自动重试。")
+                    return False
+                our_port = engine.http_port
+            else:
+                our_port = DEFAULT_HTTP_PORT
+            conflict = proxy_conflict(read_system_proxy(), our_port)
+            if conflict["conflict"]:
+                self._show_alert(
+                    f"{self._sysproxy_conflict_text(conflict['reason'])}。"
+                    "客户端不会改你的系统代理，"
+                    "也不会切换节点，是否处置由你决定。")
+                self._sysproxy_alert = True
+            return True
+
+        def _startup_health_check(self):
+            """开窗体检（task5）：端口占用 + 系统代理冲突，只提示不拦截。"""
+            engine = next((e for e in self.engines.values()
+                           if isinstance(e, SingBoxEngine)), None)
+            if engine is not None:
+                occupied = check_ports_free((engine.socks_port, engine.http_port))
+                if occupied:
+                    self._show_alert(
+                        f"启动被挡：{describe_occupied(occupied)}。引擎起不来——"
+                        "关掉占用它的程序（其他代理软件？）或改它的端口，再点一次连接。"
+                        "客户端不会动你的系统设置，也不会自动重试。")
+                    return
+                our_port = engine.http_port
+            else:
+                our_port = DEFAULT_HTTP_PORT
+            conflict = proxy_conflict(read_system_proxy(), our_port)
+            if conflict["conflict"]:
+                self._show_alert(
+                    f"{self._sysproxy_conflict_text(conflict['reason'])}。"
+                    "客户端不会改你的系统代理，"
+                    "也不会切换节点，是否处置由你决定。")
+                self._sysproxy_alert = True
+
+        def _launch_health(self, tag: str, fn):
+            """开一个健康后台线程（不占 _busy，见 _launch_auto 同款做法）。"""
+            worker = _Worker(self.bridge, tag, fn)
+            self._workers.append(worker)
+            worker.finished.connect(lambda: self._workers.remove(worker))
+            worker.start()
+
+        def _health_probe_once(self, node, proxy_url):
+            """一次出口探测（后台线程）：返回 (node_id, ok, latency_ms, reason)。"""
+            probe = make_real_probe(proxy=proxy_url, test_muse=False)
+            outcome = verify_exit(node, probe)
+            return (node.id, outcome.ok, outcome.latency_ms, outcome.reason)
+
+        def _sysproxy_check_once(self, http_port):
+            """一次系统代理复查（后台线程）：返回 (conflict, reason)。"""
+            result = proxy_conflict(read_system_proxy(), http_port)
+            return (result["conflict"], result["reason"])
+
+        def _maybe_health_probe(self):
+            """检测③：每 15s 对当前活动连接做一次出口探测（后台线程）。"""
+            if self._health_active or self._busy or self._batch_active:
+                return
+            node_id = self.orchestrator.active_node_id
+            node = self.store.get_node(node_id) if node_id else None
+            if node is None:
+                return
+            engine = self.engines.get(node.protocol)
+            if isinstance(engine, SingBoxEngine):
+                proxy_url = engine.http_proxy_url
+            else:
+                # OpenVPN 是 TUN 模式、无本地代理入站：走默认直连 probe
+                # （与 cli verifier 分流同口径，流量实际走隧道）。
+                proxy_url = None
+            self._health_active = True
+            self._launch_health(
+                "health_probe",
+                lambda: self._health_probe_once(node, proxy_url))
+
+        def _maybe_sysproxy_check(self):
+            """检测②复查：每 30s 看一眼系统代理是否被别家占了。"""
+            if self._sysproxy_active or self._busy or self._batch_active:
+                return
+            engine = next((e for e in self.engines.values()
+                           if isinstance(e, SingBoxEngine)), None)
+            http_port = engine.http_port if engine is not None else DEFAULT_HTTP_PORT
+            self._sysproxy_active = True
+            self._launch_health(
+                "sysproxy_check",
+                lambda: self._sysproxy_check_once(http_port))
+
+        def _finish_health_probe(self, ok, payload):
+            """健康探测结果落地（主线程）：只产生给人看的信号，绝不自动切换。"""
+            if not ok:
+                # 探测本身抛错 ≠ 节点不通（可能是本地引擎句柄异常）：
+                # 原样展示错误，本次不计入样本。
+                self._show_info(f"健康探测出错，本次不计入：{payload}")
+                return
+            node_id, sample_ok, latency_ms, _reason = payload
+            if node_id != self.orchestrator.active_node_id:
+                return  # 会话已换，旧样本不算到新节点头上
+            self._health_samples.append({"ok": sample_ok})
+            detail = connection_health_detail(self._health_samples)
+            status = detail["status"]
+            streak = detail["fail_streak"]
+            if status == HEALTH_DEAD:
+                text = (f"节点疑似已死：连续 {streak} 次探测失败。连接保持原样、"
+                        "绝不自动换节点——请手动断开，再自己选下一个节点。")
+                self._show_alert(text)
+                if self.tray is not None:
+                    self.tray.showMessage("gate-client 节点疑似已死", text,
+                                          QSystemTrayIcon.Warning, 5000)
+            elif status == HEALTH_SUSPECT:
+                self._show_info(
+                    f"连接可疑：连续 {streak} 次探测失败，仍保持连接、不自动切换。"
+                    "可再观察一会，或自行断开后另选节点。")
+            else:
+                lat = (f"，延迟 {latency_ms:.0f}ms"
+                       if latency_ms is not None else "")
+                self._show_info(f"连接健康：出口探测正常{lat}")
+
+        def _finish_sysproxy_check(self, ok, payload):
+            """系统代理复查结果落地（主线程）：有冲突亮条，解除则撤条。"""
+            if not ok:
+                self._show_info(f"系统代理复查出错：{payload}")
+                return
+            conflict, reason = payload
+            if conflict:
+                self._show_alert(
+                    f"{self._sysproxy_conflict_text(reason)}。客户端不会改你的系统代理，"
+                    "也不会切换节点，是否处置由你决定。")
+                self._sysproxy_alert = True
+            elif self._sysproxy_alert:
+                self._clear_alert()
+                self._sysproxy_alert = False
+
         def poll_once(self):
             """巡检：掉线由 orchestrator.poll 上报 dropped 事件，绝不自动切换。"""
             if not self._busy:
                 self.orchestrator.poll()
+            # 健康子周期（task5）：复用 5s 父 tick，不新增定时器。
+            self._health_tick += 1
+            if self.orchestrator.state != Orchestrator.CONNECTED:
+                return
+            if self._health_tick % 3 == 0:
+                self._maybe_health_probe()
+            if self._health_tick % 6 == 0:
+                self._maybe_sysproxy_check()
+                # 检测④接管生效性（task6/DESIGN §6.4）：TUN 模式每 30s 只读
+                # 查一次 /proc/net/route；未接管只告警、不修路由、不重连。
+                if self._takeover_mode() == "tun":
+                    self._tun_takeover_check_once()
+
+        def _tun_takeover_check_once(self):
+            """检测④落地（主线程）：只读检查，无后台线程（/proc 读入瞬时完成）。"""
+            result = check_tun_takeover()
+            if not result["effective"]:
+                self._show_alert(
+                    f"{result['reason']}。客户端不会自动修路由，请断开后"
+                    "重试或向审查方反馈（可能需要提权路径排查）。")
+                self._tun_alert = True
+            elif self._tun_alert:
+                self._clear_alert()
+                self._tun_alert = False
 
         # ---------------- 事件与结果回主线程 ----------------
         def _on_session_event(self, ev):
@@ -822,6 +1175,10 @@ if _QT_OK:
                 self.status_label.setText(f"已连接：{name}（{ev.detail}）")
                 self._update_tray("connected", f"已连接 {name}")
                 self._clear_alert()
+                self._sysproxy_alert = False
+                self._tun_alert = False
+                # 新会话从 unknown 开始：上一条连接的连败史不带到新节点头上
+                self._health_samples.clear()
             elif ev.kind == "verify_failed":
                 self._show_alert(f"假连已断开：{ev.detail}")
                 self.status_label.setText("未连接")
@@ -846,12 +1203,21 @@ if _QT_OK:
             if tag == "auto_probe":
                 # 自动探测不占 _busy：只复位自己的旗标，别误清用户任务的锁
                 self._auto_active = False
+            elif tag == "health_probe":
+                # 健康探测同样不占 _busy（见 _launch_health）
+                self._health_active = False
+            elif tag == "sysproxy_check":
+                self._sysproxy_active = False
             else:
                 self._busy = False
             if tag == "batch":
                 self._batch_active = False
             ok, payload = result
-            if not ok:
+            if tag == "health_probe":
+                self._finish_health_probe(ok, payload)
+            elif tag == "sysproxy_check":
+                self._finish_sysproxy_check(ok, payload)
+            elif not ok:
                 if isinstance(payload, OrchestratorError):
                     self._show_alert(str(payload))
                 else:
@@ -870,15 +1236,24 @@ if _QT_OK:
                 else:
                     self._show_alert(f"测速失败：{text}")
             elif tag == "batch" and isinstance(payload, tuple):
-                _kind, ok_n, fail_n, skip_n, done, total, label = payload
+                (_kind, ok_n, fail_n, skip_n, done, total, label,
+                 fail_ids, dirty_ids) = payload
                 stopped = "（已手动停止）" if done < total else ""
-                self._show_info(
-                    f"批量测速完成（{label}）{stopped}：可连 {ok_n} · 不通 {fail_n}"
-                    f" · 跳过 {skip_n}（共测 {done}/{total}）")
+                waste = [i for i in fail_ids + dirty_ids
+                         if i != self.orchestrator.active_node_id]
+                self._batch_waste = waste
+                msg = (f"批量测速完成（{label}）{stopped}：可连 {ok_n} · "
+                       f"不通 {fail_n} · 跳过 {skip_n}（共测 {done}/{total}）")
+                if waste:
+                    msg += (f"；本轮废节点 {len(waste)} 个，"
+                            "点「一键删废节点」可删掉")
+                self._show_info(msg)
             elif tag == "import_url" and ok:
                 self._intake_done(
                     payload.nodes,
                     f"订阅导入（格式 {payload.format}，跳过坏行 {payload.skipped}）")
+            elif tag == "sources" and isinstance(payload, str):
+                self._show_info(payload)
             self.refresh_pages()
             self._update_action_states()
 
@@ -898,6 +1273,14 @@ if _QT_OK:
             connected = self.orchestrator.state != Orchestrator.IDLE
             has_sel = self.selected_node() is not None
             self.connect_btn.setEnabled(has_sel and not connected and not self._busy)
+            # 接管方式只在未连接时可切（task6/DESIGN §2.2）：连接中禁用，
+            # tooltip 说明先断开再改。
+            self.mode_combo.setEnabled(not connected and not self._busy)
+            self.mode_combo.setToolTip(
+                "先断开，再改接管方式" if connected else
+                "接管方式：只在未连接时可切换，切换后下次连接生效。"
+                "TUN 接管全机流量，首次开启会弹系统授权框；提权启动器待"
+                "真机实现，当前版本选 TUN 点连接会显式报错。")
             self.disconnect_btn.setEnabled(connected and not self._busy)
             self.verify_btn.setEnabled(has_sel and not self._busy)
             self.pin_btn.setEnabled(has_sel)
@@ -979,10 +1362,70 @@ if _QT_OK:
             if not ok or not url.strip():
                 return
             # 地址只在内存里用，不回显、不落日志（同 CLI 红线）
-            self._run_task("import_url",
-                           lambda: format_src.import_any_text(
-                               subscription_src.fetch_subscription_text(url.strip()),
-                               subscription_url=url.strip()))
+            def _import_and_register():
+                res = format_src.import_any_text(
+                    subscription_src.fetch_subscription_text(url.strip()),
+                    subscription_url=url.strip())
+                # 订阅地址导入即登记：下次一键更新不用再贴地址；已登记过不报错。
+                try:
+                    self._registry().register("subscription", url.strip())
+                except ValueError:
+                    pass
+                return res
+            self._run_task("import_url", _import_and_register)
+
+        # ---------------- 来源登记（一键更新） ----------------
+        def _registry(self):
+            """登记表：与节点库同目录的 sources.json（CLI 共用同一份）。"""
+            path = os.path.join(
+                os.path.dirname(os.path.abspath(self.store.path or "client.db")),
+                "sources.json")
+            return registry_src.SourceRegistry(path)
+
+        def _update_sources_for_page(self, source, fetch_fn=None):
+            """更新某一页已登记的来源（工作线程内跑；fetch_fn 仅测试注入）。"""
+            reg = self._registry()
+            entries = [e for e in reg.entries()
+                       if e["page"] == source and e["enabled"]]
+            if not entries:
+                return ("本页没有已登记的来源：订阅地址导入后自动登记，"
+                        "feed 页可用「登记并更新 feed」")
+            return "\n".join(
+                registry_src.update_entry(
+                    reg, self.store, e["id"], fetch_fn=fetch_fn).summary()
+                for e in entries)
+
+        def update_registered_sources(self, fetch_fn=None):
+            """当前页「更新已登记来源」按钮：真联网拉取，走工作线程。"""
+            page = self.current_page()
+            if page is None:
+                return
+            self._run_task(
+                "sources",
+                lambda: self._update_sources_for_page(page.source,
+                                                      fetch_fn=fetch_fn))
+
+        def _register_and_update(self, type_, entry_id, name, fetch_fn=None):
+            reg = self._registry()
+            if not reg.get(entry_id):
+                reg.register(type_, name=name)
+            return registry_src.update_entry(
+                reg, self.store, entry_id, fetch_fn=fetch_fn).summary()
+
+        def register_and_update_feed(self, fetch_fn=None):
+            """feed 页「登记并更新 feed」：首次登记官方 feed 地址并拉取。"""
+            self._run_task(
+                "sources",
+                lambda: self._register_and_update(
+                    "feed", "feed", "VPN Gate 官方 feed", fetch_fn=fetch_fn))
+
+        def register_feed_mirror(self, fetch_fn=None):
+            """OpenVPN 页「登记 feed 镜像」：同一份 feed 落 OpenVPN 页。"""
+            self._run_task(
+                "sources",
+                lambda: self._register_and_update(
+                    "feed_mirror", "feed-mirror",
+                    "VPN Gate feed 镜像（OpenVPN 页）", fetch_fn=fetch_fn))
 
     def main(argv=None) -> int:
         parser = argparse.ArgumentParser(prog="gate-client-gui",
