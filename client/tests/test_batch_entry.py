@@ -11,6 +11,7 @@ U4/task19 离线测试（二）：按板块批量测的分组口径 + 入口决�
 from __future__ import annotations
 
 import re
+import sys
 import types
 import unittest
 from pathlib import Path
@@ -37,10 +38,17 @@ class FakeNode:
 
 
 def _classify_ref():
-    path = CLIENT_DEV / "client" / "core" / "classify_proto.py"
-    if not path.is_file():
+    """集成树内 classify_proto（包导入：task25 起 classify_proto 用相对
+    import 取同包 exit_keywords，spec 裸加载跑不起来；与 test_speedtest
+    的 _settings_proto_ref 同口径，task19 W1-b 既定判例）；缺席返回 None
+    （自动跳过）。"""
+    if str(CLIENT_DEV) not in sys.path:
+        sys.path.insert(0, str(CLIENT_DEV))
+    try:
+        from client.core import classify_proto
+        return classify_proto
+    except Exception:
         return None
-    return _load_module("work19_classify_ref", path)
 
 
 def _sample_nodes():
@@ -200,4 +208,7 @@ if __name__ == "__main__":
 # 1. 本文件落 client/tests/test_batch_entry.py；test_speedtest 导入加包形态回退。
 # 2. 红线扫描的 DESIGN/DONE 改为集成树内 DESIGN-speedtest.md（DONE 不落树）。
 # 3. _classify_ref 取集成树内 classify_proto（CLIENT_DEV = 集成树根）。
+# 5. task25 集成适配：_classify_ref 改包导入（classify_proto 自 task25
+#    起相对 import 同包 exit_keywords，spec 裸加载跑不起来；task19 W1-b
+#    既定判例，见 test_speedtest._settings_proto_ref）。
 # 4. 交付形态原件留 work19/，一字未动。

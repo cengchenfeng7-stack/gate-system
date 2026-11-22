@@ -4,7 +4,9 @@
 task11 分类原型：界面六板块归类（设计见 DESIGN.md）
 ====================================================
 
-只依赖标准库；不 import client 包、不依赖 PySide6（简报红线）。
+只依赖标准库；不依赖 PySide6（简报红线）。包内只 import 同包纯数据
+模块 exit_keywords（task25 其一：两张归类表抽到单一事实源，与
+verify.classify_network 共用），不 import client 包其余部分。
 对纯 dict 节点记录操作，字段口径与 client/core/model.py 的 Node / ExitProfile
 对齐（DESIGN.md §2 有逐字段对照表）。
 
@@ -30,50 +32,35 @@ API 分层（自底向上）：
 
 from __future__ import annotations
 
+from .exit_keywords import (DATA_CENTER_ORG_KEYWORDS as DATACENTER_KEYWORDS,
+                            RESIDENTIAL_ORG_KEYWORDS as RESIDENTIAL_KEYWORDS)
+
 # ---------------------------------------------------------------------------
-# 内置归类表（纯数据，可直接扩充；维护规则见 DESIGN.md §5）
+# 出口性质归类表（task25 其一逐词对齐后的单一事实源形态）
 #
-# 数据来源：与 client/core/verify.py 的 DATA_CENTER_ORG_KEYWORDS /
-# RESIDENTIAL_ORG_KEYWORDS（58-72 行）同源校准（2026-11-22 快照），
-# 另补中国主流 ISP 与若干尽人皆知厂商。条目全部是公开常识级厂商名
-# （简报红线：ISP/托管商名称只许用尽人皆知的厂商名做示例）。
-# 匹配语义：把两个入参拼成大写字符串后做【子串】匹配；机房先查、住宅后查
-# （与 verify.classify_network 的先后顺序一致，保证两处判定不打架）。
-# 扩充纪律：只增不改不删已有条目；短关键词（如两位缩写）先评估误伤再加；
-# 新条目须公开常识级或经交叉核实（主人信息处理规则 2026-11-19：搜到的
-# 信息只算原始资料，交叉对比通过才进表）；加完跑 test_classify 回归。
+# 两张表不再在本模块定义：唯一定义在同包 exit_keywords.py
+# （DATACENTER_KEYWORDS / RESIDENTIAL_KEYWORDS 是它的兼容别名——
+# 本模块与既有测试沿用旧名，定义只有一处）。表内容 = verify.py
+# 校准表逐字快照（0.27.0 实树）；本模块原表多出的 13 个宽口径词
+# 已全部销账（HURRICANE ELECTRIC / BT OPENREACH / KT CORP 是同表
+# 既有词的子串冗余，删去零行为变化；其余 10 词保留会改动 verify
+# 现行判定，task25 硬约束禁区），逐词去留依据见 work25/ALIGN-DIFF.md。
+# 条目全部是公开常识级厂商名（简报红线：ISP/托管商名称只许用尽人
+# 皆知的厂商名做示例）。
+# 匹配语义不变：把两个入参拼成大写字符串后做【子串】匹配；机房先查、
+# 住宅后查（与 verify.classify_network 的先后顺序一致，保证两处判定
+# 不打架）。
+# 扩充纪律：改词须主人裁决（动表 = 同时改 verify 四场景与 classify
+# 板块两处判定）；新条目须公开常识级或经交叉核实（主人信息处理规则
+# 2026-11-19：搜到的信息只算原始资料，交叉对比通过才进表）；
+# 加完跑 test_classify + test_classify_align 回归。
 # ---------------------------------------------------------------------------
-
-# 托管商/云厂商关键词（命中 → datacenter）
-DATACENTER_KEYWORDS = (
-    "GOOGLE", "AMAZON", "AWS", "MICROSOFT", "AZURE", "ORACLE", "IBM CLOUD",
-    "DIGITALOCEAN", "CLOUDFLARE", "AKAMAI", "FASTLY", "OVH", "HETZNER",
-    "RACKSPACE", "EQUINIX", "LINODE", "VULTR", "CHOOPA", "CONTABO", "M247",
-    "LEASEWEB", "DATACAMP", "COGENT", "HURRICANE ELECTRIC",
-    "TENCENT", "ALIBABA", "ALIYUN",
-)
-
-# 住宅 ISP 关键词（命中 → residential）
-RESIDENTIAL_KEYWORDS = (
-    # 日本（VPNGate 大本营）
-    "NTT EAST", "NTT WEST", "NTT COMMUNICATIONS", "NTT BROADBAND", "NTT",
-    "KDDI", "DOCOMO", "SOFTBANK", "J:COM", "JCOM", "OCN", "BIGLOBE", "IIJ",
-    # 北美
-    "COMCAST", "XFINITY", "AT&T", "VERIZON", "CHARTER", "SPECTRUM", "COX",
-    "CENTURYLINK", "FRONTIER", "TELUS", "ROGERS", "BELL CANADA",
-    # 欧洲
-    "VODAFONE", "ORANGE", "DEUTSCHE TELEKOM", "TELEKOM", "FASTWEB",
-    "TIM S.P.A", "LIBERO", "FREE FRANCE", "BRITISH TELECOM", "BT OPENREACH",
-    # 亚太
-    "KOREA TELECOM", "KT CORP", "SK BROADBAND", "LG UPLUS",
-    "CHUNGHWA", "HINET", "SINGTEL", "STARHUB",
-    # 中国
-    "CHINA TELECOM", "CHINA UNICOM", "CHINA MOBILE", "CHINANET", "CMCC",
-)
 
 # 例外表（先于关键词表匹配；用于「长词命中更具体性质」的纠偏）。
 # 例：GOOGLE FIBER 是住宅宽带，若不例外会被 GOOGLE 的机房关键词抢先命中。
-# 结构预留，扩充同上纪律。
+# 结构预留，扩充同上纪律。本表是 classify 侧自有的纠偏位，不属两张
+# 关键词表的对齐范围（与 verify.classify_network 的已知分歧=U2 待裁决，
+# task25 不动）。
 KIND_EXCEPTIONS = {
     "GOOGLE FIBER": "residential",
 }

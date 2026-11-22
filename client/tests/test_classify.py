@@ -37,8 +37,12 @@ class TestClassifyExit(unittest.TestCase):
                          "residential")
         self.assertEqual(cp.classify_exit("Comcast Cable", None),
                          "residential")
+        # task25 逐词对齐：CHINA TELECOM 是 classify 侧多出词，verify 冻结
+        # 表里没有（保留会改 verify 现行判定，硬约束禁区）→ 销账，落
+        # unknown（偏保守，人工改判 exit_kind_override 兜底）；与
+        # verify.classify_network 同判，不再打架（ALIGN-DIFF.md #5）。
         self.assertEqual(cp.classify_exit("China Telecom Shanghai", ""),
-                         "residential")
+                         "unknown")
 
     def test_datacenter_hit(self):
         self.assertEqual(cp.classify_exit("DigitalOcean LLC", ""),
@@ -288,9 +292,10 @@ class TestClassifyLibrary(unittest.TestCase):
             "free_datacenter": 1,    # n2
             "openvpn": 3,            # n3, n7, n13（形态单列，出口未知不堆未分类）
             "pipeline": 2,           # n4, n12
-            "paid_residential": 1,   # n5
+            "paid_residential": 0,   # n5 原在此——task25 对齐销账后移未分类
             "paid_datacenter": 2,    # n6, n14（n14 人工改判生效）
-            "unclassified": 3,       # n9, n10, n11
+            "unclassified": 4,       # n5, n9, n10, n11（n5：CHINA TELECOM
+                                     # 非共源表词，出口落 unknown 不许猜）
         })
 
     def test_board_memberships(self):
@@ -302,10 +307,13 @@ class TestClassifyLibrary(unittest.TestCase):
     def test_unclassified_list_with_reasons(self):
         report = cp.classify_library(self._library())
         items = {it["id"]: it for it in report["unclassified"]}
-        self.assertEqual(set(items), {"n9", "n10", "n11"})
+        # n5 加入未分类：task25 对齐后 CHINA TELECOM 不在共源表（verify
+        # 冻结口径），出口 ISP 未命中 → unknown（ALIGN-DIFF.md #5）。
+        self.assertEqual(set(items), {"n5", "n9", "n10", "n11"})
         self.assertIn("未标性质", " ".join(items["n9"]["missing"]))
         self.assertIn("无验真出口", " ".join(items["n10"]["missing"]))
         self.assertIn("未命中归类表", " ".join(items["n11"]["missing"]))
+        self.assertIn("未命中归类表", " ".join(items["n5"]["missing"]))
 
     def test_library_not_mutated(self):
         nodes = self._library()

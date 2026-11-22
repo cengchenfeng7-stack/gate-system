@@ -29,6 +29,8 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from .model import ExitProfile, Node
+from .exit_keywords import (DATA_CENTER_ORG_KEYWORDS,
+                            RESIDENTIAL_ORG_KEYWORDS)
 
 # ---------------------------------------------------------------------------
 # 场景阈值（复制自 vpngate.py 常量区，注明出处；改阈值须两边同步评估）
@@ -53,23 +55,11 @@ AI_MAX_LATENCY = 3500.0         # vpngate.AI_MAX_LATENCY
 STABILITY_THRESHOLD = 0.30      # vpngate.STABILITY_THRESHOLD（波动率 <30% 为稳定）
 
 # ---------------------------------------------------------------------------
-# 网络分类（逻辑复制自 vpngate.classify_network，关键词表同步复制）
+# 网络分类（逻辑复制自 vpngate.classify_network）。关键词表本体已抽到
+# 同包单一事实源 client/core/exit_keywords.py（task25 其一逐词对齐），
+# 与 classify_proto.classify_exit 共用同一份；词表冻结口径与对齐裁决
+# 见 exit_keywords.py 头注与 work25/ALIGN-DIFF.md。
 # ---------------------------------------------------------------------------
-DATA_CENTER_ORG_KEYWORDS = [
-    "GOOGLE", "AMAZON", "AWS", "MICROSOFT", "AZURE", "OVH", "HETZNER", "DIGITALOCEAN",
-    "AKAMAI", "CLOUDFLARE", "FASTLY", "RACKSPACE", "EQUINIX", "LINODE", "VULTR",
-    "HURRICANE", "TENCENT", "ALIBABA", "ALIYUN", "LEASEWEB", "LEASWEB", "CHOOPA",
-    "CONTABO", "M247", "DATACAMP", "COGENT", "ORACLE",
-]
-RESIDENTIAL_ORG_KEYWORDS = [
-    "NTT EAST", "NTT WEST", "NTT COMMUNICATIONS", "NTT BROADBAND", "KDDI", "DOCOMO",
-    "SOFTBANK", "AU COMMUNICATIONS", "J:COM", "JCOM", "OCN", "BIGLOBE",
-    "IIJ", "SEIKO", "CLEVER-NET", "AT&T", "COMCAST", "XFINITY", "VERIZON",
-    "CHARTER", "SPECTRUM", "COX", "CENTURYLINK", "FRONTIER",
-    "TELUS", "ROGERS", "BELL CANADA", "VODAFONE", "ORANGE", "DEUTSCHE TELEKOM",
-    "BREEZE", "TIM S.P.A", "LIBERO", "FASTWEB", "FREE FRANCE", "BT OPEN",
-    "KT", "SK BROADBAND", "LG UPLUS", "CHUNGHWA", "HINET", "SINGTEL", "STARHUB",
-]
 
 
 def classify_network(host, exit_org, is_datacenter=None) -> str:
