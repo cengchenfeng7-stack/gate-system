@@ -1,46 +1,37 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-统一设置存储（core/settings_store.py）—— task12 §4 持久化口径落地
+设置存储模块函数（core/settings_store.py）—— task26 ② 收敛为转调层
 ========================================================================
-task17 · 阶段五·使用界面线 实现第二段。纯标准库 + 同包 settings_proto；
-不依赖 PySide6、不碰网络、没有任何节点语义。
+task12 §4 持久化口径的函数面（task17 落地），task26 ②（用户 2026-11-22
+裁决「收」）起**函数体全部转调 settings_proto.SettingsStore**——持久化
+实现全库唯一（读写/序列化/原子写/包裹层校验/留档改名都只在
+settings_proto.SettingsStore 一处），本模块不再有任何独立的读写/序列化
+逻辑（test_ruling_wiring.py 的 grep 级断言锁定此形态）。
 
-职责（简报交付物 4 的接线前提）：settings_proto.Settings（唯一设置模型，
-work10 §11 口径）的落盘读写。③规则与网络区（work17 usage_rules_page.py）
-与后续设置页（task12 集成段）经本模块读写**同一个** settings.json——
-值只有一份、存储只有一处，不出现两个可编辑副本。
+保留的四件事（调用点不动，task26 ② 口径）：
+- 函数签名：settings_path / load_settings / save_settings / reset_settings
+  原样；settings_path 的「显式 data_dir 目录」档是**目录语义**（与
+  settings_file_path 的「--db 文件路径取目录」档不同构），路径拼装保留
+  在此，默认档转调 settings_file_path()（DEFAULT_SETTINGS_FILE 常量仍
+  只在 settings_proto 一处，§6-7 不动）。
+- SettingsStoreError：既有调用点（usage_window ⑤区/批量测等）的捕获面。
+  文件层错误（损坏/包裹层/version/读取失败）由转调层从
+  settings_proto.SettingsFileError 族**原文翻译**而来（str 不加工）；
+  字段级校验错误仍为 settings_proto.SettingsError 原样上抛——两族同属
+  ValueError，校验口径不变。
+- load_settings 的「文件不存在 → 全默认值起、零提示零动作、不写回」
+  （task12 §4.2/§4.3）：SettingsStore.load 对缺失文件抛
+  SettingsFileError（bootstrap 先 exists() 再 load 的既有合同），本函数
+  在此保留存在性分流——这是调用合同，不是第二套读逻辑。
+- reset_settings 的留档后缀 `.corrupt-<UTC时间戳>`：经
+  SettingsStore.reset(tag="corrupt") 得到（同一实现，同一名）。
 
-开工核对结论（如实记录，简报口径「不许自造平行存储绕过去」）：
-client-dev 0.20.0 里 task12 的 Settings 模型已在（core/settings_proto.py），
-但其 DESIGN §4 的持久化一环标注「原型不实现 IO，集成段落地」，全库
-（除测试夹具提及文件名外）没有 settings.json 读写代码——正是简报预判
-的「Settings 落盘接线尚缺的一环」。本模块按 task12 DESIGN §4.1–§4.3
-定稿口径补上该环：文件/目录/包裹层/原子写/损坏处置逐条照 §4，未引入
-任何新口径；若与 task12 后续集成实现冲突，以 settings_proto 模型与
-task12 DESIGN 为准（差异报 DONE.md 等裁决，不悄悄分叉）。
-
-持久化口径（task12 §4，出处随注）：
-- 文件：<数据目录>/settings.json——与 client.db 同目录，不另起目录
-  （§4.1）；设置文件固定在内置默认目录、不跟随 data_dir 设置（否则
-  「设置说设置在哪」自举成环）；显式覆盖（--db / GATE_CLIENT_DB）时
-  跟覆盖目录走——覆盖目录由调用方解析后经 settings_path(data_dir)
-  显式传入，优先级 --db > GATE_CLIENT_DB > settings.data_dir > 内置默认
-  是消费方的解析责任（§4.1/§8-3），本层不猜。
-- 格式：包裹层 {"version": 1, "settings": Settings.to_dict()}（§4.1）。
-- 写入：原子写（tmp 文件 + os.replace），每次全量写（§4.1）。
-- 读不到/损坏/缺字段（§4.2，逐情形）：
-  · 文件不存在（旧版/首次运行）→ 全默认值起，零提示零动作（§4.3）；
-  · JSON 损坏 → SettingsStoreError 如实报错，**不用默认值盖掉**——
-    呈现层据此弹窗给路径 + 重置入口；重置走 reset_settings()（先把
-    损坏文件改名留档再写默认，不删原始证据）；
-  · version 高于支持 → 拒读报错（防新版本文件被旧版静默降级）；
-  · settings 缺字段 → Settings.from_dict 补默认值，不报错；
-  · settings 未知键 / 字段值非法 → settings_proto.SettingsError 原样
-    上抛（呈现层给重置入口），不静默丢弃。
-- QSettings 迁移（auto_probe 两键首启导入，§4.3）：属界面层动作、依赖
-  Qt，归 task12 设置页集成段，本层不做（core 层保持 Qt-free）；设置页
-  接线时在首次初始化处调本层写入即可。
+行为等价红线（task26 ②）：读写文件、格式（{"version":1,"settings":…}+
+换行收尾）、字段、默认值、校验口径一律不变；save 落盘字节与 task12 §4
+历史格式逐字节同形（SettingsStore.save 已按此统一）。与
+SettingsStore 直用面的差异收敛记录（message 措辞/临时文件名
+`<file>.tmp`/未知包裹层键现在统一拒收）见 work26/DONE.md §对账。
 
 铁律对齐：本模块没有任何节点选择/切换/优选逻辑，不持有任何节点字段；
 它只存用户显式改过的偏好。
@@ -48,132 +39,82 @@ task12 DESIGN 为准（差异报 DONE.md 等裁决，不悄悄分叉）。
 
 from __future__ import annotations
 
-import json
-import os
-import tempfile
-import time
 from pathlib import Path
 
 from .settings_proto import (
-    DEFAULT_SETTINGS_FILE,
-    SETTINGS_FILE_VERSION,
     Settings,
     SettingsError,
+    SettingsFileError,
+    SettingsStore,
+    settings_file_path,
 )
 
-_WRAPPER_KEYS = frozenset({"version", "settings"})
+__all__ = ["SettingsStoreError", "settings_path", "load_settings",
+           "save_settings", "reset_settings"]
 
 
 class SettingsStoreError(ValueError):
-    """设置文件层非法（损坏/包裹层结构/version 异常）。如实报错不静默吞，
+    """设置文件层非法（损坏/包裹层/version 异常）。如实报错不静默吞，
     呈现层据此给文件路径与重置入口（task12 §4.2）。
-    字段级校验错误沿用 settings_proto.SettingsError（同属 ValueError 族）。"""
+    字段级校验错误沿用 settings_proto.SettingsError（同属 ValueError 族）。
+    task26 ② 收敛后：实现本体在 settings_proto.SettingsStore，本类保留为
+    既有调用点的捕获面——文件层错误自 SettingsFileError 族原文转译，
+    语义与实现单一事实源不变。"""
 
 
 def settings_path(data_dir=None) -> Path:
-    """设置文件路径：显式 data_dir（覆盖目录）> 内置默认
-    （settings_proto.DEFAULT_SETTINGS_FILE，expanduser）。
+    """设置文件路径：显式 data_dir（覆盖目录）> 内置默认。
 
     data_dir = --db / GATE_CLIENT_DB 显式指定时解析出的数据目录（task12
-    §4.1「显式覆盖时设置文件跟覆盖目录走」）；None = 内置默认目录。
+    §4.1「显式覆盖时设置文件跟覆盖目录走」）；None = 内置默认目录——
+    转调 settings_file_path()（settings_proto.DEFAULT_SETTINGS_FILE
+    expanduser，路径常量唯一出处 §6-7）。
     不读 settings.data_dir 字段自举（§4.1：设置文件不跟随该设置）。
     """
     if data_dir is not None:
         return Path(data_dir) / "settings.json"
-    return Path(DEFAULT_SETTINGS_FILE).expanduser()
-
-
-def _read_wrapper(path) -> dict:
-    """读文件 + 包裹层校验（损坏如实报错，不用默认值盖掉——§4.2）。"""
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            wrapper = json.load(f)
-    except (OSError, ValueError) as exc:
-        raise SettingsStoreError(
-            f"设置文件损坏（读取/JSON 解析失败）: {path}——{exc}。"
-            "按 task12 §4.2 不用默认值盖掉：请修复、或在界面用「重置为默认」"
-            "（先改名留档再写默认）。") from exc
-    if not isinstance(wrapper, dict):
-        raise SettingsStoreError(
-            f"设置文件结构非法（顶层必须是 dict 包裹层）: {path}")
-    unknown = set(wrapper) - _WRAPPER_KEYS
-    if unknown:
-        raise SettingsStoreError(
-            f"设置文件包裹层含未知键（拒绝静默忽略）: {sorted(unknown)}——{path}")
-    version = wrapper.get("version")
-    if isinstance(version, bool) or not isinstance(version, int):
-        raise SettingsStoreError(
-            f"设置文件 version 必须是整数，得到 {version!r}——{path}")
-    if version != SETTINGS_FILE_VERSION:
-        raise SettingsStoreError(
-            f"设置文件 version={version} 与本版本支持的 "
-            f"{SETTINGS_FILE_VERSION} 不一致"
-            + ("（由更新版本客户端写入，拒读防静默降级）" if version > SETTINGS_FILE_VERSION
-               else "（结构非定稿形态，拒读不猜）")
-            + f"——{path}")
-    return wrapper
+    return Path(settings_file_path())
 
 
 def load_settings(path=None) -> Settings:
-    """读设置 → Settings 实例（task12 §4.2 逐情形处置）。
+    """读设置 → Settings 实例（task12 §4.2 逐情形处置；实现转调
+    SettingsStore.load，task26 ②）。
 
-    - 文件不存在 → Settings()（全默认值 = 现行行为，零提示零动作）；
-    - 损坏/包裹层/version 异常 → SettingsStoreError（如实报错，不用
-      默认值盖掉，不静默覆盖原始证据）；
+    - 文件不存在 → Settings()（全默认值 = 现行行为，零提示零动作，
+      不写回文件）；
+    - 损坏/包裹层/version 异常/读取失败 → SettingsStoreError（自
+      SettingsFileError 族原文转译，不用默认值盖掉，不静默覆盖原始证据）；
     - settings 缺字段 → from_dict 补默认值（不报错）；
     - settings 未知键/字段值非法 → SettingsError 原样上抛。
     """
-    path = Path(path) if path is not None else settings_path()
-    if not path.exists():
+    p = Path(path) if path is not None else settings_path()
+    if not p.exists():                             # §4.3：首次运行全默认起
         return Settings()
-    wrapper = _read_wrapper(path)
-    payload = wrapper.get("settings")
-    if not isinstance(payload, dict):
-        raise SettingsStoreError(
-            f"设置文件 settings 必须是 dict，得到 {type(payload).__name__}——{path}")
-    return Settings.from_dict(payload)
+    store = SettingsStore(str(p))
+    try:
+        return store.load()
+    except SettingsFileError as exc:               # 文件层 → 既有捕获面
+        raise SettingsStoreError(str(exc)) from None
 
 
 def save_settings(settings: Settings, path=None) -> Path:
-    """全量原子写设置（task12 §4.1：tmp 文件 + os.replace，每次全量写）。
-    非 Settings 实例显式报错；返回写入路径。"""
-    if not isinstance(settings, Settings):
-        raise SettingsStoreError(
-            f"settings 必须是 Settings 实例（唯一模型，不收散字典），"
-            f"得到 {type(settings).__name__}")
-    path = Path(path) if path is not None else settings_path()
-    wrapper = {
-        "version": SETTINGS_FILE_VERSION,
-        "settings": settings.to_dict(),
-    }
-    payload = json.dumps(wrapper, ensure_ascii=False, indent=2) + "\n"
-    directory = path.parent
-    if not directory.is_dir():
-        directory.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=".settings-", dir=str(directory))
+    """全量原子写设置（实现转调 SettingsStore.save，task26 ②；§4.1：
+    临时文件 + os.replace，每次全量写）。非 Settings 实例显式报错
+    （SettingsStoreError，既有捕获面）；返回写入路径。"""
+    p = Path(path) if path is not None else settings_path()
+    store = SettingsStore(str(p))
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(payload)
-        os.replace(tmp_name, path)                 # 原子替换（同目录保证同分区）
-    except BaseException:
-        try:
-            os.unlink(tmp_name)
-        except OSError:
-            pass
-        raise
-    return path
+        store.save(settings)
+    except SettingsError as exc:                   # 含文件层子类 → 既有捕获面
+        raise SettingsStoreError(str(exc)) from None
+    return p
 
 
 def reset_settings(path=None) -> Settings:
-    """重置为默认（task12 §4.2 重置原语）：现存文件先改名
+    """重置为默认（task12 §4.2 重置原语；实现转调 SettingsStore.reset
+    (tag="corrupt")，task26 ②）：现存文件先改名
     settings.json.corrupt-<UTC时间戳> 留档（不静默覆盖、不删原始证据），
-    再写默认值并返回。呈现层（GUI 弹窗/CLI 报错）接线归设置页集成段。
-    """
-    path = Path(path) if path is not None else settings_path()
-    if path.exists():
-        stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-        backup = path.with_name(f"{path.name}.corrupt-{stamp}")
-        os.replace(path, backup)                   # 留档改名（同目录原子）
-    fresh = Settings()
-    save_settings(fresh, path)
-    return fresh
+    再写默认值并返回。呈现层（GUI 弹窗/CLI 报错）接线归设置页集成段。"""
+    p = Path(path) if path is not None else settings_path()
+    store = SettingsStore(str(p))
+    return store.reset(tag="corrupt")

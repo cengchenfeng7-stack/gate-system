@@ -818,6 +818,9 @@ class TestSettingsStore(SettingsStoreTestBase):
 
 # ---------------------------------------------------------------------------
 # 组 5：③区 offscreen（PySide6 缺席整组 skip，不伪造通过）
+# task26 ①（裁决 A）：③区降只读摘要——五项规则字段的唯一编辑入口收敛到
+# 设置页。本组从「编辑落盘」改写为「只读摘要」契约：值行现读 settings、
+# 无可用编辑控件、任何③区交互不改 settings.json。
 # ---------------------------------------------------------------------------
 @unittest.skipUnless(_QT, "无 PySide6，③区 offscreen 组整组跳过"
                           "（原因记 DONE.md），不伪造通过")
@@ -842,137 +845,148 @@ class TestUsageRulesPanel(PanelTestBase):
     def stored(self, path=None):
         return settings_store.load_settings(path or self.path)
 
-    # ---- 构造与初值 ----
+    def _md5(self, path=None):
+        import hashlib
+        with open(path or self.path, "rb") as f:
+            return hashlib.md5(f.read()).hexdigest()
+
+    # ---- 构造与初值（只读摘要形态） ----
     def test_construct_defaults_offscreen(self):
         p = self.make_panel()
-        self.assertEqual(p.mode_combo.currentData(), "global")
-        self.assertFalse(p.ad_chk.isChecked())
-        self.assertFalse(p.mal_chk.isChecked())
-        self.assertFalse(p.ipv6_chk.isChecked())
-        self.assertEqual(p.dns_combo.currentData(), "google")
+        self.assertIn("全局", p._value_labels["split_mode"].text())
+        self.assertEqual(p._value_labels["ad_block"].text(), "关")
+        self.assertEqual(p._value_labels["malware_block"].text(), "关")
+        self.assertEqual(p._value_labels["ipv6"].text(), "关")
+        self.assertEqual(p._value_labels["dns_server"].text(),
+                         "google · 8.8.8.8")
+        self.assertIn("在设置页修改", p.note_label.text())
         self.assertIn("下次连接生效", p.note_label.text())
         self.assertIn("不做热重载", p.note_label.text())
 
-    def test_controls_only_five_fields(self):
-        """控件面恰为③区五项（work10 §2.2）：一个不多（端口/数据目录/
-        自动探测/名单编辑一个不放）。"""
+    def test_summary_rows_exactly_five_fields(self):
+        """摘要面恰为③区五项（work10 §2.2）：一行不多（端口/数据目录/
+        自动探测/名单编辑一个不放——它们只归设置页）。"""
         p = self.make_panel()
-        self.assertEqual(p.mode_combo.count(), 3)
-        self.assertEqual(p.dns_combo.count(), 4)       # 三预设 + 自定义
+        self.assertEqual(sorted(p._value_labels),
+                         ["ad_block", "dns_server", "ipv6", "malware_block",
+                          "split_mode"])
         for name in ("socks", "http", "端口", "数据目录", "自动探测",
                      "名单", "黑名单编辑"):
             self.assertNotIn(name, p.note_label.text())
 
-    # ---- 值落盘往返 ----
-    def test_ad_toggle_persists(self):
+    def test_readonly_no_edit_widgets(self):
+        """只读断言①：编辑控件全部摘除——属性不存在 + 控件树内无任何
+        QComboBox/QCheckBox/QLineEdit（「无可用编辑控件」强口径）。"""
         p = self.make_panel()
-        p.ad_chk.setChecked(True)
-        self.assertTrue(self.stored().ad_block)
-        self.assertIn("已保存", p.status_label.text())
-        self.assertIn("下次连接生效", p.status_label.text())
+        for attr in ("mode_combo", "ad_chk", "mal_chk", "ipv6_chk",
+                     "dns_combo", "dns_edit"):
+            self.assertFalse(hasattr(p, attr),
+                             f"编辑控件 {attr} 必须摘除（task26 ①）")
+        from PySide6.QtWidgets import QCheckBox, QComboBox, QLineEdit
+        self.assertEqual(p.findChildren(QComboBox), [])
+        self.assertEqual(p.findChildren(QCheckBox), [])
+        self.assertEqual(p.findChildren(QLineEdit), [])
 
-    def test_mode_combo_persists_all_three(self):
-        p = self.make_panel()
-        for i, mode in enumerate(("rule", "direct", "global")):
-            idx = p.mode_combo.findData(mode)
-            p.mode_combo.setCurrentIndex(idx)
-            self.assertEqual(self.stored().split_mode, mode, f"档位 {mode}")
+    def test_no_write_pipeline_in_class(self):
+        """只读断言②：写回管道整体摘除——旧编辑管道方法在类上不存在。"""
+        for method in ("_apply_field", "_on_mode_changed", "_on_dns_preset",
+                       "_on_dns_custom", "_set_controls_enabled"):
+            self.assertFalse(hasattr(self.UsageRulesPanel, method),
+                             f"写管道 {method} 必须摘除（task26 ①）")
 
-    def test_ipv6_toggle_persists(self):
+    # ---- 值展示：现读 settings，不缓存脏副本 ----
+    def test_display_matches_storage(self):
+        s = settings_proto.Settings(
+            split_mode="rule", ad_block=True, malware_block=True,
+            ipv6=True, dns_server="quad9", socks_port=7901, http_port=7902,
+            data_dir="/tmp/other-dir", auto_probe_enabled=False,
+            auto_probe_interval_min=20)
+        settings_store.save_settings(s, self.path)
         p = self.make_panel()
-        p.ipv6_chk.setChecked(True)
-        self.assertTrue(self.stored().ipv6)
-        p.ipv6_chk.setChecked(False)
-        self.assertFalse(self.stored().ipv6)
+        self.assertIn("规则", p._value_labels["split_mode"].text())
+        self.assertEqual(p._value_labels["ad_block"].text(), "开")
+        self.assertEqual(p._value_labels["malware_block"].text(), "开")
+        self.assertEqual(p._value_labels["ipv6"].text(), "开")
+        self.assertEqual(p._value_labels["dns_server"].text(),
+                         "quad9 · 9.9.9.9")
+        self.assertEqual(p.current_usage(), s.usage_dict())
 
-    def test_custom_dns_ip_persists(self):
+    def test_custom_dns_ip_displayed(self):
+        settings_store.save_settings(
+            settings_proto.Settings(dns_server=_DOC_DNS), self.path)
         p = self.make_panel()
-        p.dns_combo.setCurrentIndex(p.dns_combo.count() - 1)   # 自定义档
-        p.dns_edit.setText(_DOC_DNS)
-        p.dns_edit.editingFinished.emit()
-        self.assertEqual(self.stored().dns_server, _DOC_DNS)
-        # 预设档切回 → combo data 直写
-        idx = p.dns_combo.findData("quad9")
-        p.dns_combo.setCurrentIndex(idx)
-        self.assertEqual(self.stored().dns_server, "quad9")
-
-    # ---- 校验失败：红字 + 控件回退，不静默保存 ----
-    def test_domain_dns_rejected_widget_reverts(self):
-        p = self.make_panel()
-        p.dns_combo.setCurrentIndex(p.dns_combo.count() - 1)
-        p.dns_edit.setText("dns.example.com")          # 域名形态拒收
-        p.dns_edit.editingFinished.emit()
-        self.assertEqual(self.stored().dns_server, "google", "非法值不得落盘")
-        self.assertIn("未保存", p.status_label.text())
-        self.assertEqual(p.dns_combo.currentData(), "google", "控件回退存储值")
-
-    def test_ipv6_off_with_v6_dns_reverts(self):
-        p = self.make_panel()
-        p.ipv6_chk.setChecked(True)                    # 先开 IPv6
-        self.assertTrue(self.stored().ipv6)
-        p.dns_combo.setCurrentIndex(p.dns_combo.count() - 1)
-        p.dns_edit.setText("2001:db8::53")             # RFC 3849 文档段 v6
-        p.dns_edit.editingFinished.emit()
-        self.assertEqual(self.stored().dns_server, "2001:db8::53")
-        p.ipv6_chk.setChecked(False)                   # 再关 IPv6 → 交叉校验拒
-        self.assertTrue(self.stored().ipv6, "存储值不得被非法改动")
-        self.assertTrue(p.ipv6_chk.isChecked(), "控件回退存储值")
-        self.assertIn("未保存", p.status_label.text())
-
-    # ---- 单字段写入：五项之外的原样保留 ----
-    def test_single_field_write_preserves_other_nine(self):
-        base = settings_proto.Settings(socks_port=7901, http_port=7902,
-                                       data_dir="/tmp/other-dir",
-                                       auto_probe_enabled=False,
-                                       auto_probe_interval_min=20,
-                                       malware_block=True)
-        settings_store.save_settings(base, self.path)
-        p = self.make_panel()
-        self.assertTrue(p.mal_chk.isChecked())          # 初值来自存储
-        p.ad_chk.setChecked(True)
-        s = self.stored()
-        self.assertTrue(s.ad_block)                     # 只改了这一项
-        self.assertEqual(s.socks_port, 7901)
-        self.assertEqual(s.http_port, 7902)
-        self.assertEqual(s.data_dir, "/tmp/other-dir")
-        self.assertFalse(s.auto_probe_enabled)
-        self.assertEqual(s.auto_probe_interval_min, 20)
-        self.assertTrue(s.malware_block)
-        self.assertEqual(s.split_mode, "global")
-        self.assertEqual(s.dns_server, "google")
-        self.assertFalse(s.ipv6)
+        self.assertEqual(p._value_labels["dns_server"].text(), _DOC_DNS)
+        self.assertEqual(p.current_usage()["dns_server"], _DOC_DNS)
 
     def test_panel_is_no_second_copy_reload_from_storage(self):
-        """唯一存储：另一面板实例从同一存储取值（不许出现两个可编辑副本）。"""
+        """唯一存储：另一面板实例从同一存储取值（不许出现两个副本）；
+        设置页（外部）改值 → 新面板/ reload 即见。"""
         p1 = self.make_panel()
-        p1.mode_combo.setCurrentIndex(p1.mode_combo.findData("rule"))
+        self.assertEqual(p1.current_usage()["split_mode"], "global")
+        settings_store.save_settings(
+            settings_proto.Settings(split_mode="rule"), self.path)
         p2 = self.make_panel()
-        self.assertEqual(p2.mode_combo.currentData(), "rule")
-        self.assertTrue(p2.current_usage()["split_mode"] == "rule")
+        self.assertEqual(p2.current_usage()["split_mode"], "rule")
+        p1.reload()                                    # 已有实例同样现读
+        self.assertEqual(p1.current_usage()["split_mode"], "rule")
 
-    # ---- 存储异常形态（task12 §4.2：不用默认值盖掉） ----
-    def test_corrupt_storage_disables_panel_and_blocks_save(self):
+    # ---- 禁写：任何③区交互不改 settings.json（task26 ① 红线） ----
+    def test_interactions_never_write_settings(self):
+        settings_store.save_settings(
+            settings_proto.Settings(split_mode="rule", ad_block=True),
+            self.path)
+        before_md5 = self._md5()
+        before_raw = open(self.path, "r", encoding="utf-8").read()
+        p = self.make_panel()
+        # 可做的全部③区交互：值行被程序性改写（只改显示）、reload、
+        # 规则集「立即更新」（写规则集缓存，不是 settings.json）
+        for label in p._value_labels.values():
+            label.setText("交互探测")
+        p.reload()
+        p.update_btn.click()
+        self.assertEqual(self._md5(), before_md5,
+                         "任何③区交互不得改 settings.json（md5 前后一致）")
+        self.assertEqual(open(self.path, "r", encoding="utf-8").read(),
+                         before_raw, "settings.json 字节级不变")
+        self.assertEqual(self.stored().split_mode, "rule")
+        self.assertTrue(self.stored().ad_block)
+
+    # ---- 存储异常形态（task12 §4.2：不用默认值盖掉，如实未知） ----
+    def test_corrupt_storage_shows_unknown_and_never_writes(self):
         with open(self.path, "w", encoding="utf-8") as f:
             f.write("{ corrupted")
         raw_before = open(self.path, "r", encoding="utf-8").read()
+        md5_before = self._md5()
         p = self.make_panel()
         self.assertIn("读取失败", p.status_label.text())
-        self.assertFalse(p.mode_combo.isEnabled())
-        self.assertFalse(p.ad_chk.isEnabled())
-        p.ad_chk.setChecked(True)                       # 禁用态程序性触发仍会走管道
+        for key, label in p._value_labels.items():
+            self.assertEqual(label.text(), "—",
+                             f"{key} 读不出时显「—」，不用默认值冒充")
+        self.assertIsNone(p.current_usage())
+        for label in p._value_labels.values():
+            label.setText("交互探测")                  # 程序性交互仍禁写
+        p.reload()
+        self.assertEqual(self._md5(), md5_before,
+                         "损坏文件不得被任何写入覆盖")
         self.assertEqual(open(self.path, "r", encoding="utf-8").read(),
-                         raw_before, "损坏文件不得被任何保存覆盖")
+                         raw_before, "留档口径：损坏文件字节级不变")
 
     def test_reload_after_external_fix(self):
         with open(self.path, "w", encoding="utf-8") as f:
             f.write("{ corrupted")
         p = self.make_panel()
-        self.assertFalse(p.mode_combo.isEnabled())
+        self.assertIn("读取失败", p.status_label.text())
         settings_store.save_settings(
             settings_proto.Settings(split_mode="rule"), self.path)
         p.reload()
-        self.assertTrue(p.mode_combo.isEnabled())
-        self.assertEqual(p.mode_combo.currentData(), "rule")
+        self.assertIn("规则", p._value_labels["split_mode"].text())
+        self.assertEqual(p.current_usage()["split_mode"], "rule")
+
+    # ---- 区界（task18 既有交付物不在五项字段收敛范围，原样保留） ----
+    def test_ruleset_update_row_preserved(self):
+        p = self.make_panel()
+        self.assertEqual(p.update_btn.text(), "立即更新")
+        self.assertTrue(p.ruleset_status.text())
 
 
 # ---------------------------------------------------------------------------

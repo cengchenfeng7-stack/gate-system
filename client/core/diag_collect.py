@@ -42,9 +42,11 @@ from urllib.parse import urlsplit
 from . import diag
 from . import health
 from . import history
+from . import settings_store
 from ..engines.openvpn_engine import OpenVPNEngine
 from ..engines.singbox_engine import (DEFAULT_HTTP_PORT, DEFAULT_SOCKS_PORT,
                                       SingBoxEngine)
+from .settings_proto import settings_file_path
 from .store import Store, VerifySample
 
 COLLECT_VERSION = "0.1.0"           # 收集器自身版本（进 00 号文件）
@@ -341,17 +343,44 @@ def collect_secrets(store, registry=None, now: Optional[float] = None,
 
 
 # ---------------------------------------------------------------------------
-# run_checks 的 env（DESIGN §4.0 对照表——探测全部复用 core/health）
+# 探测端口解析（task26 ③：随设置走，与 connect/status/doctor/GUI 同口径）
 # ---------------------------------------------------------------------------
+def _ports_from_settings() -> Optional[Tuple[int, int]]:
+    """当前统一设置的引擎入站端口（task26 ③）。
+
+    落点解析与 main() 同一条链（settings_file_path：GATE_CLIENT_DB 显式
+    目录 > 内置默认目录；`--db` 显式档由调用方注入的引擎/设置端口替身
+    承载——cli._collect_check_env 形态，本层不猜）。设置里有引擎端口字段
+    （socks_port/http_port）就用它；文件不存在/读不了（损坏/版本/非法值）
+    → None = 无设置可用，调用方回落模块默认端口（singbox_engine 既有
+    常量），不猜、不抛——诊断收集对设置损坏 resilient（探测照跑）。
+    只读，绝不写设置。"""
+    sfile = settings_file_path(env_db=os.environ.get("GATE_CLIENT_DB"))
+    try:
+        s = settings_store.load_settings(sfile)
+    except (ValueError, OSError):
+        return None
+    return int(s.socks_port), int(s.http_port)
+
+
 def _check_env(survey, engines=None, orchestrator=None,
                health_samples=None, now: Optional[float] = None) -> dict:
     store = survey["store"]
     sb = _singbox_like(engines)
-    if sb is None:
+    if sb is not None:
+        # 引擎样对象自带双端口属性（_singbox_like 的鸭子判定已含）→
+        # 会话真实端口优先：GUI/CLI 注入的引擎都按统一设置端口构造/
+        # 对齐（task24 §8-1），连接中导出时测的是当下会话在用的端口。
+        socks_port = int(sb.socks_port)
+        http_port = int(sb.http_port)
+    else:
+        # 无引擎可依：从当前 settings 解析端口（task26 ③，与
+        # connect/status/doctor/GUI 同口径——设置里有引擎端口字段就用它）；
+        # 无设置可用才回落模块默认端口。
+        resolved = _ports_from_settings()
+        socks_port, http_port = (resolved if resolved is not None
+                                 else (DEFAULT_SOCKS_PORT, DEFAULT_HTTP_PORT))
         sb = SingBoxEngine()                       # 默认引擎：构造器只设属性
-
-    http_port = int(getattr(sb, "http_port", DEFAULT_HTTP_PORT))
-    socks_port = int(getattr(sb, "socks_port", DEFAULT_SOCKS_PORT))
     mode = str(getattr(sb, "takeover_mode", "proxy") or "proxy").strip().lower()
 
     singbox_bin = ""
@@ -381,6 +410,9 @@ def _check_env(survey, engines=None, orchestrator=None,
         "openvpn_needed": any(r.get("protocol") == "openvpn"
                               for r in survey["records"]),
         "openvpn_found": bool(_find_openvpn_binary()),
+        # 实际探测端口（task26 ③ 记账键：占用/系统代理探测与 01 号文件
+        # 展示用同一份解析结果；diag.run_checks 按已知键取值，不读它）
+        "probe_ports": {"socks": socks_port, "http": http_port},
         "ports_occupied": health.check_ports_free((socks_port, http_port)),
         "proxy_conflict": health.proxy_conflict(health.read_system_proxy(),
                                                 http_port),
@@ -438,6 +470,12 @@ def _file_01_environment(survey, env, singbox_bin: str) -> str:
         nodes_bits.append(f"{env['db_sample_count']} 条验真样本")
     conflict = env.get("proxy_conflict") or {}
     occupied = env.get("ports_occupied") or []
+    # 展示端口与实际探测端口同一份解析结果（task26 ③：随设置走；
+    # probe_ports 缺键（外部组装的 env）时按既有模块默认兜底展示）
+    probe = env.get("probe_ports") or {}
+    ports_text = (f"无（{probe.get('http', DEFAULT_HTTP_PORT)}/"
+                  f"{probe.get('socks', DEFAULT_SOCKS_PORT)} 空闲）"
+                  if not occupied else health.describe_occupied(occupied))
     lines = [
         "环境摘要（DB 路径家目录已掩码为 ~/…）",
         f"DB 路径: {_mask_home(getattr(survey['store'], 'path', '') or '')}",
@@ -448,7 +486,7 @@ def _file_01_environment(survey, env, singbox_bin: str) -> str:
         f"openvpn 二进制: {ov_bin or '未找到'}"
         + (f"（版本: {_binary_version(ov_bin, ('--version',)) or '版本未知'}）"
            if ov_bin else ""),
-        f"引擎端口占用: {'无（7897/7898 空闲）' if not occupied else health.describe_occupied(occupied)}",
+        f"引擎端口占用: {ports_text}",
         f"接管方式: {env.get('takeover_mode') or 'proxy'}",
         f"系统代理判读: {conflict.get('reason') or '判读结果缺失'}",
     ]

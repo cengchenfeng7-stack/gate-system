@@ -22,7 +22,9 @@ task12 原型（§3/§4 定稿口径）的集成落地。与原型的差别（DE
   否则内置默认目录」（不跟随 data_dir 设置——否则「设置说设置在哪」
   自举成环）。settings.json 最终路径只在一处常量（DEFAULT_SETTINGS_FILE）。
 
-不变（原型既定口径）：`Settings` frozen dataclass 10 字段、默认值 =
+不变（原型既定口径）：`Settings` frozen dataclass（原型 10 字段，task19
+扩 speedtest_payload_url、task28 扩 list_recheck_days、task31 扩自动搜集
+五项后共 17）、默认值 =
 现行行为、to_dict / from_dict（缺字段补默认、未知键抛错）/ merge
 （只覆盖显式字段）/ usage_dict；非法值一律 `SettingsError(ValueError)`
 ——报错不静默吞、不静默纠正。
@@ -59,6 +61,10 @@ from .usage_model import (
 
 # U4/task19 扩展位：载荷地址校验器——校验单一事实源，不复制第二份规则
 from .speedtest import SpeedTestConfigError, validate_payload_url
+
+# task28 名单复查周期：校验单一事实源 = core/list_recheck（机制同用
+# 一份，不复制第二套 2..7 规则——消镜像 §8-2 同款做法）
+from .list_recheck import validate_recheck_days
 
 # ---------------------------------------------------------------------------
 # 常量（出处随注；端口/目录默认与原型一致）
@@ -102,8 +108,9 @@ class SettingsFileError(SettingsError):
 
 
 class SettingsCorruptError(SettingsFileError):
-    """JSON 损坏 / 包裹层结构缺失。处置（§4.2）：如实报错，重置 = 原文件
-    改名留档再写默认——不静默覆盖、不删原始证据。"""
+    """JSON 损坏 / 包裹层结构缺失 / 文件读不出（非「不存在」的读取失败）。
+    处置（§4.2）：如实报错，重置 = 原文件改名留档再写默认——不静默覆盖、
+    不删原始证据。"""
 
 
 class SettingsVersionError(SettingsFileError):
@@ -136,6 +143,17 @@ def _require_positive_int(name: str, value) -> None:
     if value < 1:
         raise SettingsError(
             f"{name} 必须是正数（≥1），得到 {value!r}")
+
+
+def _require_non_negative_int(name: str, value) -> None:
+    """非负整数校验：int（bool 拒收）且 ≥0（task31 候选间隔口径：
+    0 = 显式关闭间隔，合法值；负数与 0/1 冒充的布尔一律拒收）。"""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise SettingsError(
+            f"{name} 必须是整数，得到 {value!r}")
+    if value < 0:
+        raise SettingsError(
+            f"{name} 必须是非负数（≥0），得到 {value!r}")
 
 
 def _validate_usage_fields(split_mode, ad_block, malware_block, ipv6,
@@ -177,11 +195,37 @@ class Settings:
     # —— 界面层：自动探测 ——
     auto_probe_enabled: bool = True
     auto_probe_interval_min: int = 10
+    # —— 名单复查周期（task28 / work10 §6.3）：默认 3 天，可调 2–7 ——
+    # 主人 2026-11-22 04:29 定「每几天复查探查一次」；校验单一事实源 =
+    # core/list_recheck.validate_recheck_days（越界显式报错，不静默夹取）。
+    list_recheck_days: int = 3
     # —— U4 扩展位：测速载荷地址（task19 / work10 §10、§13-G） ——
     # 默认空 = 未配置（客户端不内置地址，主人在设置页核定填入）；
     # 非空只认 http(s) 形态，校验单一事实源 = core/speedtest
     # .validate_payload_url（实测器同用一份，两处口径不打架）。
     speedtest_payload_url: str = ""
+    # —— 应用层：自动搜集（task31 定稿；依据逐项见 work31 DESIGN §2） ——
+    # 铁律：开关默认关——不经主人点头，客户端不许自己联网拉新节点。
+    # auto_collect_enabled 只控制「GUI 定时器是否到点自动跑一轮搜集」，
+    # 不控制手动 sources collect（永远可用）；开也不碰引擎连接、
+    # 不切节点——搜集只往库里加候选，活节点永不自动替换。
+    auto_collect_enabled: bool = False
+    # 定时间隔：默认 30 分钟 = AUTO_PROBE_INTERVAL_CHOICES 同档位最保守
+    # 档（搜集轮 = 联网拉种子 + 逐候选验真，远重于延迟探测，取低频）。
+    collect_interval_min: int = 30
+    # 每轮验真上限：默认 10。单候选验真最坏 ≈60s（core/verify 探针
+    # timeout 常量 3×20 + 15 + 25）+ 临时引擎起停；10 个最坏 ≈10–11 分钟
+    # ≪ 30 分钟轮间隔；对照 GUI 批量切片 _AUTO_SLICE=40（fast 探测），
+    # 搜集是全套探针 + 每候选起停引擎，更重，取其 1/4。
+    collect_verify_per_round: int = 10
+    # 候选间隔（毫秒）：默认 1000。验真临时引擎固定端口 10838/10839
+    # 串行复用，stop→start 之间给端口重绑留余量（engine._terminate 的
+    # wait 本就按秒级预算）；10 候选一轮只加 10s。0 = 显式关闭。
+    collect_verify_delay_ms: int = 1000
+    # 转登记门槛：同一候选连续验真通过（且出口未污染）次数，默认 1 =
+    # task27 现行「过即进」口径（work9 §7.2 步骤 4 原文），数字可调，
+    # 调大 = 更保守的「多轮验得活才收」。
+    collect_promote_min_ok: int = 1
 
     def __post_init__(self):
         # 规则五项：校验与文案唯一事实源 = usage_model（§8-2 消镜像）
@@ -209,6 +253,12 @@ class Settings:
         _require_bool("auto_probe_enabled", self.auto_probe_enabled)
         _require_positive_int("auto_probe_interval_min",
                               self.auto_probe_interval_min)
+        # 名单复查周期（task28 / work10 §6.3）：整数 2..7，越界显式报错
+        # 不静默夹取；校验单一事实源 = list_recheck（机制同用一份）。
+        try:
+            validate_recheck_days(self.list_recheck_days)
+        except ValueError as exc:
+            raise SettingsError(str(exc)) from exc
         # U4 扩展位（task19）：载荷地址空 = 未配置（合法默认）；非空
         # 只认 http(s) 形态（校验器与实测器同源，见模块 docstring）。
         # 校验失败换 SettingsError 抛——设置层的错归设置层错误族。
@@ -217,6 +267,19 @@ class Settings:
                 validate_payload_url(self.speedtest_payload_url)
             except SpeedTestConfigError as exc:
                 raise SettingsError(f"speedtest_payload_url: {exc}") from exc
+
+        # 自动搜集五项（task31）：开关严格布尔（0/1 冒充拒收）；间隔/
+        # 每轮上限/转登记门槛正整数（同 auto_probe_interval_min 口径）；
+        # 候选间隔非负整数（0 = 显式关闭间隔）。
+        _require_bool("auto_collect_enabled", self.auto_collect_enabled)
+        _require_positive_int("collect_interval_min",
+                              self.collect_interval_min)
+        _require_positive_int("collect_verify_per_round",
+                              self.collect_verify_per_round)
+        _require_non_negative_int("collect_verify_delay_ms",
+                                  self.collect_verify_delay_ms)
+        _require_positive_int("collect_promote_min_ok",
+                              self.collect_promote_min_ok)
 
     # ---------------- 序列化（§3.4） ----------------
     def to_dict(self) -> dict:
@@ -232,7 +295,13 @@ class Settings:
             "data_dir": self.data_dir,
             "auto_probe_enabled": self.auto_probe_enabled,
             "auto_probe_interval_min": self.auto_probe_interval_min,
+            "list_recheck_days": self.list_recheck_days,
             "speedtest_payload_url": self.speedtest_payload_url,
+            "auto_collect_enabled": self.auto_collect_enabled,
+            "collect_interval_min": self.collect_interval_min,
+            "collect_verify_per_round": self.collect_verify_per_round,
+            "collect_verify_delay_ms": self.collect_verify_delay_ms,
+            "collect_promote_min_ok": self.collect_promote_min_ok,
         }
 
     @classmethod
@@ -327,13 +396,19 @@ def derived_data_dir(store_path="", settings=None) -> str:
 
 
 class SettingsStore:
-    """settings.json 读写（§4.1/§4.2）。
+    """settings.json 读写（§4.1/§4.2）——**唯一持久化实现**（task26 ②：
+    core/settings_store.py 的 load/save/reset 函数体已收敛为转调本类，
+    全库不再有第二套读写/序列化逻辑）。
 
-    - load()：包裹层校验（version 管理在包裹层，不进 from_dict）；
-      字段层校验交给 Settings.from_dict（缺字段补默认、未知键/非法值
-      抛 SettingsError 上抛给呈现方——不静默丢配置）。
+    - load()：包裹层校验（version 管理在包裹层，不进 from_dict；包裹层
+      键恰为 version+settings，未知键拒收不静默忽略——task12 §4.2 口径，
+      task26 ② 收敛时从 settings_store._read_wrapper 并入）；字段层校验
+      交给 Settings.from_dict（缺字段补默认、未知键/非法值抛 SettingsError
+      上抛给呈现方——不静默丢配置）。
     - save()：原子写（临时文件 + os.replace，与 task10 sources.json 同
-      口径），每次全量写。
+      口径），每次全量写；字节形态 {"version": 1, "settings": <全字段
+      平面 dict>} + 换行收尾（与 task12 §4 settings_store 历史格式逐字节
+      同形——task26 ② 收敛时统一，读方 json.load 对换行不敏感）。
     - reset(tag)：现文件改名留档（corrupt→`.corrupt-<UTC时间戳>`，
       恢复默认→`.bak-<UTC时间戳>`；§4.2/§5.4——不静默覆盖、不删原始
       证据）再写默认，返回默认 Settings。
@@ -352,6 +427,9 @@ class SettingsStore:
                 raw = f.read()
         except FileNotFoundError as exc:
             raise SettingsFileError(f"设置文件不存在: {self.path}") from exc
+        except OSError as exc:                     # 非「不存在」的读失败（权限等）
+            raise SettingsCorruptError(
+                f"设置文件损坏（读取失败）：{self.path}（{exc}）") from None
         try:
             data = json.loads(raw)
         except ValueError as exc:
@@ -360,6 +438,11 @@ class SettingsStore:
         if not isinstance(data, dict):
             raise SettingsCorruptError(
                 f"设置文件损坏（顶层不是 JSON 对象）：{self.path}")
+        unknown = set(data) - {"version", "settings"}
+        if unknown:
+            raise SettingsCorruptError(
+                f"设置文件包裹层含未知键（拒绝静默忽略）: {sorted(unknown)}"
+                f"——{self.path}")
         version = data.get("version")
         if isinstance(version, bool) or not isinstance(version, int):
             raise SettingsCorruptError(
@@ -377,7 +460,8 @@ class SettingsStore:
         return Settings.from_dict(data["settings"])
 
     def save(self, settings: Settings) -> None:
-        """原子写：{"version": 1, "settings": <全字段平面 dict>}。"""
+        """原子写：{"version": 1, "settings": <全字段平面 dict>}（换行收尾，
+        与 task12 §4 历史格式逐字节同形——task26 ② 收敛口径）。"""
         if not isinstance(settings, Settings):
             raise SettingsError(
                 f"save 只收 Settings，得到 {type(settings).__name__}")
@@ -388,6 +472,7 @@ class SettingsStore:
         tmp = self.path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
+            f.write("\n")
         os.replace(tmp, self.path)
 
     def reset(self, tag: str = "bak") -> Settings:

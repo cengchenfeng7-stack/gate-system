@@ -485,10 +485,15 @@ if _QT_OK:
             self.boards[classify_proto.UNCLASSIFIED] = page
             self.tabs.addTab(page, "未分类")
             root.addWidget(self.tabs)
-            # ---------------- ③ 规则与网络区（U2/task17） ----------------
-            # 唯一编辑值 = task12 Settings 存储（usage_dict() 一侧）；生效
-            # 口径=下次连接生效（连接时供给器现读），面板常驻明示。
-            self.rules_panel = UsageRulesPanel()
+            # ---------------- ③ 规则与网络区（U2/task17；task26 ① 降只读） --
+            # task26 ①（裁决 A）：五项规则字段的唯一编辑入口收敛到设置页，
+            # ③区只读摘要——现读 settings 显示当前生效值 + 「在设置页修改」
+            # 提示，禁写路径整体摘除（不再写 settings.json）。settings_path
+            # 与设置页同一落点（settings_store.path；无 settings_store 的
+            # 离线测试替身形态 → 内置默认目录口径，面板自行处理）。
+            self.rules_panel = UsageRulesPanel(
+                settings_path=(self.settings_store.path
+                               if self.settings_store is not None else None))
             root.addWidget(self.rules_panel)
 
             # ---------------- ⑤ 测速与监测区（task19：本段落监测状态行） ----
@@ -595,11 +600,13 @@ if _QT_OK:
             - 端口：**下次连接生效**——连接构造点对齐
               （connect_node → _sync_engine_ports_with_settings）；
             - 规则五项：**下次连接生效**——引擎供给器（task17）每次连接
-              现读 settings.json，本窗只存值；
+              现读 settings.json，本窗只存值；③区只读摘要随保存现读刷新
+              （task26 ①：reload 现读同一份 settings.json，改即见）；
             - 自动探测（立即）/ 数据目录（下次启动）：归后台窗落地——
               自动探测的定时器与启动构造点都在后台窗，这里转交同一份
               settings，保证两窗设置状态不分叉（值只有一份、存储只有一处）。"""
             self.settings = s
+            self.rules_panel.reload()   # ③区摘要现读刷新（task26 ①）
             self._sync_engine_ports_with_settings()
             if self._backend_window is not None \
                     and hasattr(self._backend_window, "_apply_saved_settings"):
