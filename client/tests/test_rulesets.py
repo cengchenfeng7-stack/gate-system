@@ -12,7 +12,7 @@ work18 离线测试（test_rulesets.py）—— U3 拦截规则集
 1. 交付物在位 + 静态扫描（impl 模块零 "://" 字样——全仓无真实 URL 红线；
    四禁词/节点优选词零出现——铁律红线）；
 2. 来源校验组（逐项报错不静默吞；空槽语义）；
-3. 来源文件层组（缺文件=空槽 / 损坏如实报错 / version 拒读 / 原子写往返）；
+3. 来源文件层组（缺文件=内置默认来源〔task35：验活槽位落默认源、候选全灭槽位保持空槽〕/ 损坏如实报错 / version 拒读 / 原子写往返）；
 4. 缓存组（假 fetcher 假 .srs 字节：原子落盘、失败保旧字节不变、
    空内容拒写、tmp 无残留；状态报告字段齐全）；
 5. plan/resolve 组（四种开关/缓存/来源组合的产出形状——验收口径；
@@ -128,15 +128,24 @@ class TestDeliverablesPresent(unittest.TestCase):
                 os.path.isfile(os.path.join(CLIENT_DEV, rel)),
                 f"{rel} 缺失（集成落位口径）")
 
-    def test_impl_sources_contain_no_scheme_urls(self):
-        """红线：impl 全部源码零 "://"——客户端不内置来源（work10 §8.2），
-        连「知名公开规则集」地址都不许出现；url 校验只留 scheme 名。"""
-        for rel in ("client/core/ruleset_source.py",
-                    "client/core/ruleset_cache.py"):
-            with open(os.path.join(CLIENT_DEV, rel), encoding="utf-8") as f:
-                src = f.read()
-            self.assertNotIn("://", src,
-                             f"{rel} 出现 scheme:// 字样（真实/伪 URL 红线）")
+    def test_impl_sources_url_literals_are_default_set_only(self):
+        """红线（task35 收紧改写）：原口径「impl 源码零 :://」由 task35
+        有意解除（验活通过的默认源可入码，公开规则集仓库地址，简报明示）。
+        机械锁改写为：ruleset_source.py 的 URL 字面量只许来自内置默认源
+        （共享前缀 raw.githubusercontent.com/SagerNet/sing-geosite）；
+        ruleset_cache.py 仍零 "://"（不内置任何来源的职责边界不变）。"""
+        import re
+        with open(os.path.join(CLIENT_DEV, "client/core/ruleset_source.py"),
+                  encoding="utf-8") as f:
+            src = f.read()
+        hits = set(re.findall(r"https?://[A-Za-z0-9.\-/]+", src))
+        self.assertEqual(hits, {
+            "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/"})
+        with open(os.path.join(CLIENT_DEV, "client/core/ruleset_cache.py"),
+                  encoding="utf-8") as f:
+            cache_src = f.read()
+        self.assertNotIn("://", cache_src,
+                         "ruleset_cache.py 出现 scheme:// 字样（红线）")
 
     def test_impl_sources_free_of_node_selection_words(self):
         """铁律红线扫描：拦截只走 reject 语义，不夹带节点优选/替换行为。"""
@@ -288,13 +297,22 @@ class TestSourceFileLayer(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
         self.path = ruleset_source.sources_path(self.dir)
 
-    def test_missing_file_is_all_empty_slots(self):
+    def test_missing_file_uses_builtin_defaults(self):
+        """task35：缺文件 = 内置默认来源——验活通过的槽位（ads/cn）为
+        remote 真条目（url 恰为 DEFAULT_REMOTE_SOURCES，无占位键），候选
+        全灭的槽位（malware）保持空槽原样。"""
         sources = ruleset_source.load_sources(self.path)
-        self.assertEqual(sources, ruleset_source.empty_sources())
+        self.assertEqual(sources["ads-blockset"]["type"], "remote")
+        self.assertEqual(sources["ads-blockset"]["url"],
+                         ruleset_source.DEFAULT_REMOTE_SOURCES["ads-blockset"])
+        self.assertEqual(sources["cn-directset"]["type"], "remote")
+        self.assertEqual(sources["cn-directset"]["url"],
+                         ruleset_source.DEFAULT_REMOTE_SOURCES["cn-directset"])
+        self.assertEqual(sources["malware-blockset"],
+                         ruleset_source.empty_source("malware-blockset"))
         for entry in sources.values():
-            self.assertIsNone(entry["type"])
-            self.assertIsNone(entry["url"])
-            self.assertIsNone(entry["path"])
+            self.assertNotIn("prototype_placeholder", entry)
+            self.assertNotIn("cache/rulesets", json.dumps(entry))
 
     def test_corrupt_file_reported_not_swallowed(self):
         _write_file(self.path, b"{not json")
@@ -304,8 +322,12 @@ class TestSourceFileLayer(unittest.TestCase):
 
     def test_wrapper_shape_and_version(self):
         _write_file(self.path, json.dumps({"version": 1, "sources": {}}).encode())
-        self.assertEqual(ruleset_source.load_sources(self.path),
-                         ruleset_source.empty_sources())
+        # task35：登记文件 = 用户覆盖层——空覆盖层（sources={}）不撤销
+        # 内置默认，已核定槽位仍为默认 remote 真条目
+        sources = ruleset_source.load_sources(self.path)
+        self.assertEqual(sources["ads-blockset"]["type"], "remote")
+        self.assertEqual(sources["cn-directset"]["type"], "remote")
+        self.assertEqual(sources["malware-blockset"]["type"], None)
         _write_file(self.path, json.dumps({"version": 2, "sources": {}}).encode())
         with self.assertRaisesRegex(ruleset_source.RulesetSourceError, "version"):
             ruleset_source.load_sources(self.path)

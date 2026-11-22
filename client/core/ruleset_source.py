@@ -16,16 +16,22 @@ import 本模块，不产生循环（settings_proto → usage_model 链不受影
 tag 名等口径与 usage_model 的同名常量逐字一致，由口径一致测试组机械锁定
 （work18/test_rulesets.py，client-dev 缺席自动跳过，task12 先例）。
 
-不内置任何真实来源（§8.2 红线）：本模块连同测试**一个真实规则集 URL 都
-没有**；来源只能由主人经 approve_source 填入空槽。url 校验只查形态
-（http/https + 主机存在），不查内容、不访问网络。
+不内置任何真实来源（§8.2 红线）——task35 有意解除并落地默认来源：主会话
+给定的公开候选已逐个实测验活（HTTP GET → .srs 魔数判定，记录在
+work35/source-verification.md），验活通过的槽位落 `DEFAULT_REMOTE_SOURCES`
+内置默认源（验活才落；全灭的槽位如 malware-blockset 保持空槽，绝不拿
+未验源凑数）。登记文件 ruleset_sources.json 语义 = **用户覆盖层**：
+用户经 approve_source 核定的条目逐槽位覆盖默认值，没登记的槽位用默认
+（有默认者）或空槽（无默认者）。url 校验只查形态（http/https + 主机
+存在），不查内容、不访问网络。
 
 文件层（形态同 site_blocklist.json / settings.json 家族口径）：
 - 落点：数据目录 ruleset_sources.json（与 settings.json / site_blocklist.json
   同目录；DEFAULT_DATA_DIR 字面量与 settings_proto.DEFAULT_DATA_DIR 由测试
   锁定同族）；路径可注入以便测试。
 - 包裹层：{"version": 1, "sources": {tag: 条目}}；只存**已核定**条目
-  （空槽不落盘——文件缺席 = 全部空槽 = 默认状态）。
+  （空槽不落盘——文件缺席 = 内置默认来源；task35 起登记文件为用户
+  覆盖层，未登记槽位按 default_sources 补默认或空槽）。
 - 写入：原子写（临时文件 + os.replace，task12 §4.1 同款口径）。
 
 损坏/缺失处置（site_blocklist.json 同款口径，报错不静默吞）：
@@ -235,6 +241,45 @@ def empty_sources() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# 内置默认来源（task35：主会话给定候选逐个验活后落地；验活记录 =
+# work35/source-verification.md）
+# ---------------------------------------------------------------------------
+# 只收验活通过槽位：ads-blockset（geosite-category-ads-all.srs，HTTP 200
+# + SRS 魔数）与 cn-directset（geosite-cn.srs，HTTP 200 + SRS 魔数——槽位
+# 语义为 rule 模式国内域名直连分流，取域名库；geoip-cn 亦验活通过，留档
+# 备选不落默认）。malware-blockset 两个候选全灭（404×2）→ 保持空槽，
+# 绝不拿未验源凑数（宁缺勿假）。地址为公开规则集仓库的公开地址，可出现
+# 在代码与文档（task35 简报口径）；规则集本体内容不落盘。
+DEFAULT_REMOTE_SOURCES = {
+    ADS_RULESET_TAG:
+        "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/"
+        "geosite-category-ads-all.srs",
+    CN_DIRECT_RULESET_TAG:
+        "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/"
+        "geosite-cn.srs",
+}
+
+
+def default_sources() -> dict:
+    """内置默认来源登记表（task35）：验活通过槽位 = remote 真条目
+    （type=remote、url=验活地址、update_interval=None=内核默认 1d；
+    download_detour 由 plan_ruleset_parts 既有口径自动加 node-out），
+    未核定槽位（候选全灭者）= 空槽原样。
+
+    消费口径：load_sources 以本表为底、用户登记条目逐槽位覆盖——登记
+    文件是用户覆盖层，主人核定的条目永远赢，没登记的槽位用默认（有
+    默认者）或空槽（无默认者）。每次返回全新 dict（调用方就地改不动
+    内部常量）；纯数据函数，零网络、零文件 IO。"""
+    entries = empty_sources()
+    for tag, url in DEFAULT_REMOTE_SOURCES.items():
+        entries[tag] = validate_source_entry({
+            "tag": tag, "type": SOURCE_REMOTE, "url": url,
+            "update_interval": None,
+        })
+    return entries
+
+
+# ---------------------------------------------------------------------------
 # 文件层（形态同 site_blocklist.json 家族：包裹层 + 原子写 + 如实报错）
 # ---------------------------------------------------------------------------
 def sources_path(data_dir=None) -> Path:
@@ -247,14 +292,31 @@ def sources_path(data_dir=None) -> Path:
 
 
 def load_sources(path=None) -> dict:
-    """读来源登记 → 全量登记表（缺文件 = 全空槽；已核定条目覆盖空槽）。
+    """读来源登记 → 全量登记表（task35 起以内置默认来源为底：用户登记
+    条目逐槽位覆盖默认值；文件缺席 = 内置默认来源）。
 
-    损坏/包裹层结构/version/条目非法/未知 tag 一律 RulesetSourceError
-    如实报错（不静默当空槽吞掉，site_blocklist 同款口径）。
+    登记文件语义 = 用户覆盖层（task35）：主人核定条目永远赢，没登记的
+    槽位用默认来源（有默认者，见 default_sources）或空槽（无默认者，
+    如 malware-blockset 候选全灭）。损坏/包裹层结构/version/条目非法/
+    未知 tag 一律 RulesetSourceError 如实报错（不静默吞，site_blocklist
+    同款口径）。
     """
     file_path = Path(path) if path is not None else sources_path()
+    entries = default_sources()   # task35：登记表 = 用户覆盖层，默认为底
+    entries.update(_load_stored_entries(file_path))
+    return entries
+
+
+def _load_stored_entries(file_path) -> dict:
+    """读登记文件的**用户已核定条目**（纯覆盖层，不含内置默认；
+    文件缺席 = 空 dict）。损坏/包裹层结构/version/条目非法/未知 tag
+    一律 RulesetSourceError 如实报错（不静默吞）。
+
+    approve_source 走本读取（而非 load_sources 合并视图）落盘——默认
+    来源是代码内置事实，绝不借保存路径写进用户文件（否则默认值被冻结
+    成「用户核定」，覆盖层语义失效）。"""
     if not file_path.exists():
-        return empty_sources()
+        return {}
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             wrapper = json.load(f)
@@ -285,7 +347,7 @@ def load_sources(path=None) -> dict:
     if not isinstance(stored, dict):
         raise RulesetSourceError(
             f"规则集来源登记文件 sources 必须是 dict，得到 {stored!r}——{file_path}")
-    entries = empty_sources()
+    entries = {}
     for tag, entry in stored.items():
         if tag not in KNOWN_RULESET_TAGS:
             raise RulesetSourceError(
@@ -294,8 +356,7 @@ def load_sources(path=None) -> dict:
         if not isinstance(entry, dict):
             raise RulesetSourceError(
                 f"来源登记条目 {tag} 必须是 dict，得到 {entry!r}——{file_path}")
-        normalized = validate_source_entry(dict(entry, tag=tag))
-        entries[tag] = normalized
+        entries[tag] = validate_source_entry(dict(entry, tag=tag))
     return entries
 
 
@@ -351,13 +412,16 @@ def approve_source(tag: str, *, source_type: str, path=None, url=None,
     prototype_placeholder 键**的真条目——「删占位键即视为核定完成」
     （work10 §8.2）由此机械达成，无需任何手工删键步骤。
 
+    task35 覆盖层口径：落盘读写走 _load_stored_entries（纯用户层）——
+    内置默认来源不借保存路径写进用户文件，登记文件只存用户核定条目。
+
     data_dir 语义同 sources_path（覆盖目录注入以便测试）。
     """
     entry = validate_source_entry({
         "tag": tag, "type": source_type, "path": path, "url": url,
         "update_interval": update_interval,
     })
-    entries = load_sources(sources_path(data_dir))
+    entries = _load_stored_entries(sources_path(data_dir))
     entries[tag] = entry
     save_sources(entries, sources_path(data_dir))
     return entry
