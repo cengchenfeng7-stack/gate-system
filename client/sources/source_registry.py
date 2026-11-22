@@ -10,6 +10,10 @@
 存量 sources.json 由 sources/landing.py 启动迁移，work8/DESIGN §5。）
 设计全文见本目录 DESIGN.md；已集成进 client 包（task3 原型落地 v0.6.0）：不发任何网络请求除非
 真实调用方显式使用默认拉取函数（测试一律注入假拉取函数，零联网）。
+task30 起持久化收口双形态：SourceRegistry(store=...) 读写走 Store 的
+sources 表（事实源），SourceRegistry(path=...) 文件形态兼容保留；
+migrate_registry_json_to_store 一次性把 JSON 只读搬进表（JSON 留存备查
+不再被读写）。
 
 复用不重造（口径见 DESIGN.md §10）：
 - feed 解析：client.sources.feed.parse_feed_to_nodes（source 参数决定落页；
@@ -242,13 +246,32 @@ class UpdateReport:
 class SourceRegistry:
     """来源登记表：增删查 + last_update 记账。
 
-    原型期持久化为独立 JSON 文件（临时文件 + os.replace 原子替换）；
-    path=None 为内存态（测试用）。集成落位：折进 core/store.py 成
-    source_registry 表，与 nodes 共用 RLock，事务性随 Store 白得
-    （DESIGN.md §3.3）。本原型单线程使用；跨线程集成时靠 Store 的锁序列化。
+    task30 起双形态：
+    - store 形态 SourceRegistry(store=...)：读写全部走 Store 的 sources /
+      source_last_updates 表（与 nodes 共用同一连接 + 同一把 RLock，登记
+      写与节点写同锁串行、同连接可见），不再碰任何文件；cli._registry
+      走本形态。校验/去重/单例/地址口径在 Store.register 一侧，与本类
+      文件形态逐字同文（test_registry_store 等价组看守不漂移）。
+    - 文件形态 SourceRegistry(path=...)：兼容保留（测试与离线工具用），
+      独立 JSON 文件持久化（临时文件 + os.replace 原子替换），行为不变；
+      path=None 为内存态（测试用）。
+
+    一次性搬家：模块级 migrate_registry_json_to_store(path, store) 把
+    JSON 只读导入表（幂等、损坏显式报错）；此后 JSON 只是备查存根，
+    不再被读写——写入只走表（task30 收口 JSON 与 SQLite 双真相）。
     """
 
-    def __init__(self, path: str = None):
+    def __init__(self, path: str = None, store=None):
+        if store is not None:
+            if path is not None:
+                raise ValueError(
+                    "store 形态不收 path（SourceRegistry(store=...)）")
+            self.store = store
+            self.path = None
+            self._entries = None        # store 形态不缓存：读写即时走表
+            self._last = None
+            return
+        self.store = None
         self.path = path
         self._entries = {}        # id -> entry dict
         self._last = {}           # id -> last_update dict
@@ -276,7 +299,11 @@ class SourceRegistry:
         """登记一个可续期来源。feed 地址可留空（自动填官方默认）；
         subscription 必须给 http/https 地址。返回登记条目副本。
         （feed_mirror 类型已废除——task8/task23 落页，work8/DESIGN §5.1；
-        传它会在这里显式报错。）"""
+        传它会在这里显式报错。）store 形态下同口径逻辑在 Store.register
+        （参数与返回值口径一字不差）。"""
+        if self.store is not None:
+            return self.store.register(type_, address=address, name=name,
+                                       enabled=enabled, now=now)
         if type_ not in ENTRY_TYPES:
             raise ValueError(f"未知来源类型: {type_}（可选 {ENTRY_TYPES}）")
         address = (address or "").strip()
@@ -312,6 +339,8 @@ class SourceRegistry:
         """删除登记：只删条目，**节点原地不动**（样本/置顶/拉黑/消失标记
         都在节点上，DESIGN §8）；此后该来源无人刷新，节点成为孤儿，
         extra 溯源字段仍在。返回是否删到。"""
+        if self.store is not None:
+            return self.store.remove(entry_id)
         if entry_id in self._entries:
             del self._entries[entry_id]
             self._last.pop(entry_id, None)
@@ -320,6 +349,9 @@ class SourceRegistry:
         return False
 
     def set_enabled(self, entry_id: str, enabled: bool) -> None:
+        if self.store is not None:
+            self.store.set_enabled(entry_id, enabled)
+            return
         entry = self._entries.get(entry_id)
         if entry is None:
             raise ValueError(f"未登记的来源: {entry_id}")
@@ -327,18 +359,27 @@ class SourceRegistry:
         self._save()
 
     def entries(self) -> list:
+        if self.store is not None:
+            return self.store.entries()   # 恒按 id 排序（同持久化排序）
         return [dict(e) for e in self._entries.values()]
 
     def get(self, entry_id: str):
+        if self.store is not None:
+            return self.store.get(entry_id)
         e = self._entries.get(entry_id)
         return dict(e) if e else None
 
     def last_update(self, entry_id: str):
         """上次更新结果（含上次时间与结果计数）；从未更新过返回 None。"""
+        if self.store is not None:
+            return self.store.last_update(entry_id)
         lu = self._last.get(entry_id)
         return dict(lu) if lu else None
 
     def _record(self, entry_id: str, payload: dict) -> None:
+        if self.store is not None:
+            self.store.set_last_update(entry_id, payload)
+            return
         self._last[entry_id] = payload
         self._save()
 
@@ -370,6 +411,51 @@ class SourceRegistry:
             raise ValueError(f"未登记的来源: {entry_id}")
         return [n for n in self.owned_nodes(store, entry)
                 if n.extra.get("source_gone") == "1"]
+
+
+# ---------------------------------------------------------------------------
+# 一次性搬家：登记 JSON → Store sources 表（task30）
+# ---------------------------------------------------------------------------
+def migrate_registry_json_to_store(path: str, store) -> dict:
+    """把 sources.json（文件形态的持久化存量）只读导入 Store 的 sources 表。
+
+    口径（task30 简报红线逐条落在这里）：
+    - **只读 JSON**：文件不删、不改、不重命名、不重写——迁移后它保留在
+      原地备查作回退，但不再是事实源（写入从此只走表）。
+    - **逐条原样收编**：条目七字段原样进表（走 Store.import_source，不重
+      算 id、不重跑 register 校验——迁移以 JSON 为准，register 口径留给
+      新登记走）；id 已在表内 → 整条跳过（**重复跑零重复**）。
+    - **记账随条目走**：JSON last_updates 里新导入条目的记账一并进表；
+      表内已有条目的记账以表内现值为准，不被旧 JSON 盖写。
+    - **损坏显式报错**：JSON 解不开 / 顶层不是对象 / entries 不是数组 /
+      条目缺 id / last_updates 不是对象 → ValueError（带路径），不静默
+      吞、不重置文件、表一字节不动（校验全部先于任何写入）。
+    - 返回 {"imported": n, "skipped": m}（条目级计数）。
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"来源登记 JSON 损坏（{path}）: {exc}") from None
+    if not isinstance(data, dict):
+        raise ValueError(f"来源登记 JSON 顶层应为对象（{path}）")
+    raw_entries = data.get("entries", [])
+    if not isinstance(raw_entries, list):
+        raise ValueError(f"来源登记 JSON entries 应为数组（{path}）")
+    for e in raw_entries:
+        if not isinstance(e, dict) or not e.get("id"):
+            raise ValueError(f"来源登记 JSON 条目缺 id（{path}）")
+    last_updates = data.get("last_updates", {})
+    if not isinstance(last_updates, dict):
+        raise ValueError(f"来源登记 JSON last_updates 应为对象（{path}）")
+    imported = skipped = 0
+    for e in raw_entries:
+        lu = last_updates.get(e["id"])
+        if store.import_source(e, lu if isinstance(lu, dict) else None):
+            imported += 1
+        else:
+            skipped += 1
+    return {"imported": imported, "skipped": skipped}
 
 
 # ---------------------------------------------------------------------------

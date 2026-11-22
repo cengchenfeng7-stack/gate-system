@@ -2,7 +2,6 @@
 """ui/cli sources 离线测试：登记/更新/删除 + 订阅导入自动登记。
 假 fetcher 注入，绝不触网；地址只用假域名；登记表地址不回显全址。"""
 import base64
-import json
 import os
 import sys
 import tempfile
@@ -51,9 +50,14 @@ class TestCliSources(unittest.TestCase):
         return run_cli(["--db", self.db, "sources", *argv], fetcher=fetcher)
 
     def _registry_json(self):
-        with open(os.path.join(self.tmp.name, "sources.json"),
-                  encoding="utf-8") as f:
-            return json.load(f)
+        """task30 起登记表事实源是 Store 的 sources 表（sources.json 只在
+        表空首用时被只读迁移一次，不再被写入）。本 peephole 改读表、方法
+        名留旧；下方各断言的口径一行不动。"""
+        store = Store(self.db)
+        try:
+            return {"entries": store.entries()}
+        finally:
+            store.close()
 
     def _db_count(self):
         store = Store(self.db)
