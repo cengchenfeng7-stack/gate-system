@@ -74,6 +74,16 @@ PLACEHOLDER_KEY = "prototype_placeholder"   # 占位条目必带此键（DESIGN 
                                             # 集成段换真条目时删占位键=核定完成）
 _PLACEHOLDER_DIR = "cache/rulesets"
 
+from . import ruleset_source as _ruleset_source
+
+# 占位条目文件名（原 ③④⑤ 块内联字面量收拢为映射常量，占位口径不变；
+# 锚点在常量块之后——映射引用 ADS/MALWARE/CN 三常量）
+_PLACEHOLDER_FILES = {
+    ADS_RULESET_TAG: "ads.srs",
+    MALWARE_RULESET_TAG: "malware.srs",
+    CN_DIRECT_RULESET_TAG: "cn-direct.srs",
+}
+
 # ---------------------------------------------------------------------------
 # 校验
 # ---------------------------------------------------------------------------
@@ -245,14 +255,16 @@ def _placeholder_ruleset(tag: str, filename: str) -> dict:
     }
 
 
-def build_route_config(model: UsageSettings, site_blocklist=()) -> dict:
+def build_route_config(model: UsageSettings, site_blocklist=(), ruleset_state=None) -> dict:
     """设置模型 + 网站黑名单 → sing-box 路由/DNS 配置片段（假数据可跑）。
 
     返回结构（DESIGN §4.5 合并顺序契约的机械落地说明）：
     - route.rules：按语义排序的规则（引擎合并时插在既有 resolve 规则
       **之前**——先拦截后解析，被拦域名不做无谓解析；insert_before 提示）；
-    - route.rule_set：本片段引用的规则集定义（全部占位条目，带
-      prototype_placeholder 键，DESIGN §8.2）；
+    - route.rule_set：本片段引用的规则集定义——ruleset_state=None 时
+      为占位条目（0.14.0 口径原样）；接线后按来源核定与缓存状态产出
+      真条目（无占位键）或省略（uncovered 显式记录，DESIGN §8.2/U3
+      收口）；
     - route.final_override：仅 direct 模式给 direct-out，其余 None
       （route.final 引擎原样保留，单节点单出站语义不动）；
     - dns_patch：写回引擎既有字段的指令——remote-dns 的 server、
@@ -294,22 +306,28 @@ def build_route_config(model: UsageSettings, site_blocklist=()) -> dict:
                 f"{model.split_mode} 模式下不生成（与模式语义冲突，显式跳过）："
                 + ", ".join(direct_domains))
 
-    # ③ 广告拦截（DESIGN §8：rule_set 机制，tag 固定）
-    if model.ad_block:
-        rules.append({"rule_set": [ADS_RULESET_TAG], "action": SITE_REJECT})
-        rule_set.append(_placeholder_ruleset(ADS_RULESET_TAG, "ads.srs"))
+    # ③④⑤ 广告拦截 / 恶意拦截 / 国内直连规则集（U3/task18 收口：激活
+    # 条件与规则语义与原 ③④⑤ 块逐字一致；占位条目仍由本模块既有
+    # _placeholder_ruleset 落地——0.14.0 片段层占位口径原样）
+    parts = _ruleset_source.plan_ruleset_parts(
+        {ADS_RULESET_TAG: model.ad_block,
+         MALWARE_RULESET_TAG: model.malware_block,
+         CN_DIRECT_RULESET_TAG: model.split_mode == SPLIT_RULE},
+        ruleset_state)
+    rules.extend(parts["rules"])
+    for entry in parts["rule_set"]:
+        if "__placeholder__" in entry:
+            rule_set.append(_placeholder_ruleset(
+                entry["__placeholder__"],
+                _PLACEHOLDER_FILES[entry["__placeholder__"]]))
+        else:
+            rule_set.append(entry)
+    notes.extend(parts["notes"])
+    dynamic_uncovered = list(parts["uncovered"])
 
-    # ④ 恶意软件拦截（与广告同一机制，独立 tag）
-    if model.malware_block:
-        rules.append({"rule_set": [MALWARE_RULESET_TAG], "action": SITE_REJECT})
-        rule_set.append(_placeholder_ruleset(MALWARE_RULESET_TAG, "malware.srs"))
-
-    # ⑤ rule 模式的国内直连规则集（DESIGN §4.1：常识规则归规则集，
-    # 不另设开关；来源同走 §8.2 核定制）
+    # ⑤续 rule/direct 模式的出站补丁与 final（原 ⑤ 块语义原样，与
+    # 规则集来源/缓存状态无关）
     if model.split_mode == SPLIT_RULE:
-        rules.append({"rule_set": [CN_DIRECT_RULESET_TAG], "action": "route",
-                      "outbound": DIRECT_OUT_TAG})
-        rule_set.append(_placeholder_ruleset(CN_DIRECT_RULESET_TAG, "cn-direct.srs"))
         outbound_patch.append({"type": "direct", "tag": DIRECT_OUT_TAG})
     elif model.split_mode == SPLIT_DIRECT:
         # direct 模式：route.final 改指 direct-out（引擎合并时写回）。
@@ -337,7 +355,7 @@ def build_route_config(model: UsageSettings, site_blocklist=()) -> dict:
         },
         "dns_patch": dns_patch,
         "outbound_patch": outbound_patch,
-        "uncovered": _uncovered(),
+        "uncovered": _uncovered() + dynamic_uncovered,
         "notes": notes,
     }
 

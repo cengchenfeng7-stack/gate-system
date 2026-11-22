@@ -37,13 +37,17 @@ IPv6、DNS 服务器（预设 google/cloudflare/quad9 + 自定义 IP）。
 
 from __future__ import annotations
 
+import os
+import time
+
 from ..core import settings_proto, settings_store
+from ..core import ruleset_cache
 from ..core.usage_model import DNS_PRESETS, SPLIT_MODE_LABELS
 
 try:
     from PySide6.QtWidgets import (
         QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel,
-        QLineEdit, QVBoxLayout,
+        QLineEdit, QPushButton, QVBoxLayout,
     )
     _QT_OK = True
 except ImportError:  # pragma: no cover - 无 Qt 环境时的降级路径
@@ -81,6 +85,10 @@ if _QT_OK:
             super().__init__(parent)
             self._path = settings_path          # None = 内置默认目录（settings_store 口径）
             self._loading = False               # 程序性回填期间压制控件回调
+            # U3：规则集登记/缓存的数据目录（settings.json 同目录口径；
+            # None = 内置默认目录）。随面板注入以便测试。
+            self._data_dir = (os.path.dirname(os.path.abspath(self._path))
+                              if self._path else None)
             self.setFrameStyle(QFrame.StyledPanel)
 
             root = QVBoxLayout(self)
@@ -133,6 +141,19 @@ if _QT_OK:
             row += 1
             root.addLayout(grid)
 
+            # 规则集「立即更新」行（U3/task18）：③区内按钮 + 逐 tag
+            # 状态行（数据来自 ruleset_cache.cache_status；远端条目
+            # 如实标注内核托管，不编造内核接口）
+            grid.addWidget(QLabel("规则集更新"), row, 0)
+            update_box = QHBoxLayout()
+            self.update_btn = QPushButton("立即更新")
+            update_box.addWidget(self.update_btn, 0)
+            self.ruleset_status = QLabel("")
+            self.ruleset_status.setWordWrap(True)
+            update_box.addWidget(self.ruleset_status, 1)
+            grid.addLayout(update_box, row, 1)
+            row += 1
+
             # 常驻生效口径（界面明示「下次连接生效」；不做热重载）
             self.note_label = QLabel(EFFECT_NOTE)
             self.note_label.setStyleSheet("color:#9a9ca6;")
@@ -153,8 +174,10 @@ if _QT_OK:
                 lambda on: self._apply_field("ipv6", on, self.ipv6_chk))
             self.dns_combo.currentIndexChanged.connect(self._on_dns_preset)
             self.dns_edit.editingFinished.connect(self._on_dns_custom)
+            self.update_btn.clicked.connect(self._on_update_now)
 
             self.reload()
+            self._refresh_ruleset_status()
 
         # ---------------- 存储读写（唯一存储，无第二副本） ----------------
         def reload(self):
@@ -268,6 +291,62 @@ if _QT_OK:
             if not text:
                 return                          # 清空=放弃编辑，不写空值
             self._apply_field("dns_server", text, self.dns_edit)
+
+        # ---------------- 规则集立即更新（U3/task18） ----------------
+        def _ruleset_status_lines(self):
+            """逐 tag 缓存状态行（数据来自缓存状态报告，mtime 即
+            last_updated）。读失败如实给错误行（不静默当无缓存）。
+            远端条目如实标注内核托管（§13-E：客户端无触发接口）。
+            """
+            try:
+                status = ruleset_cache.cache_status(self._data_dir)
+            except ValueError as exc:
+                return [f"规则集缓存状态读取失败：{exc}"]
+            lines = []
+            for tag in sorted(status):
+                item = status[tag]
+                if item["present"]:
+                    updated = time.strftime(
+                        "%Y-%m-%d %H:%M:%S",
+                        time.localtime(item["last_updated"]))
+                    lines.append(f"{tag}：{item['size_bytes']} B · "
+                                 f"更新于 {updated}")
+                else:
+                    lines.append(f"{tag}：无缓存")
+            return lines
+
+        def _refresh_ruleset_status(self):
+            self.ruleset_status.setText("\n".join(
+                self._ruleset_status_lines()))
+            self.ruleset_status.setStyleSheet(_STATUS_OK_STYLE)
+            self.update_btn.setEnabled(True)
+
+        def _on_update_now(self):
+            """「立即更新」：local 条目经缓存管理重下载（宁旧勿缺），
+            remote 条目如实回报内核托管（客户端无触发接口，§13-E）；
+            逐 tag 结果 + 缓存状态（last_updated）同走状态行，
+            不弹模态框。同步执行（v1：取材为本地文件复制量级）。
+            """
+            self.update_btn.setEnabled(False)
+            try:
+                results = ruleset_cache.update_rulesets(
+                    data_dir=self._data_dir)
+            except ValueError as exc:
+                self.ruleset_status.setText(f"更新失败：{exc}")
+                self.ruleset_status.setStyleSheet(_STATUS_ERR_STYLE)
+                self.update_btn.setEnabled(True)
+                return
+            lines = [f"{'✓' if r['ok'] else '—'} {r['message']}"
+                     for r in results.values()]
+            lines.extend(self._ruleset_status_lines())
+            self.ruleset_status.setText("\n".join(lines))
+            # 告警口径（§8.3）：取材/落盘失败才红字（宁旧勿缺的告警）；
+            # no_source / 内核托管是如实回报，不当失败渲染
+            warn = any(r["kind"] in ("fetch_failed", "write_failed")
+                       for r in results.values())
+            self.ruleset_status.setStyleSheet(
+                _STATUS_ERR_STYLE if warn else _STATUS_OK_STYLE)
+            self.update_btn.setEnabled(True)
 
         # ---------------- 测试/审计出口 ----------------
         def current_usage(self) -> dict:

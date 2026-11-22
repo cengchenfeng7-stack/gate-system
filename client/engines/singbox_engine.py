@@ -106,7 +106,8 @@ class SingBoxEngine:
                  ready_timeout: float = 15.0, popen_factory=None,
                  lx_binary: Optional[str] = None,
                  takeover_mode: str = "proxy",
-                 usage_provider=None):
+                 usage_provider=None,
+                 ruleset_state_provider=None):
         # 构造器不碰文件系统、不找二进制——二进制解析懒到 find_binary/start
         self._binary = binary
         self._lx_binary = lx_binary
@@ -127,6 +128,10 @@ class SingBoxEngine:
         # 黑名单（「下次连接生效」口径的机械保证）。None = 不合并
         # （现行行为，零变化，默认值红线）。
         self.usage_provider = usage_provider
+        # U3（task18）：规则集来源/缓存状态供给器——连接时现读来源登记
+        # 与缓存状态（与 usage_provider 同款「下次连接生效」口径）。
+        # None = 不传 state（usage_model 保留占位口径，现行行为零变化）。
+        self.ruleset_state_provider = ruleset_state_provider
         atexit.register(self._stop_all_live)
 
     # ---------------- 二进制解析 ----------------
@@ -283,7 +288,15 @@ class SingBoxEngine:
             raise EngineError(f"使用设置/黑名单读取失败: {exc}") from exc
         if usage is None:
             return None
-        return _usage_model.build_route_config(usage, blocklist)
+        ruleset_state = None
+        if self.ruleset_state_provider is not None:
+            try:
+                ruleset_state = self.ruleset_state_provider()
+            except ValueError as exc:
+                raise EngineError(
+                    f"规则集来源/缓存状态读取失败: {exc}") from exc
+        return _usage_model.build_route_config(usage, blocklist,
+                                               ruleset_state=ruleset_state)
 
     @staticmethod
     def _need_endpoint(label: str, host, port) -> None:
