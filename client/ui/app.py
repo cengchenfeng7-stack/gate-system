@@ -32,7 +32,9 @@ import sys
 import time
 from collections import deque
 
+from ..core import failover
 from ..core import history
+from ..core import ruleset_cache
 from ..core import settings_store as settings_store_io, site_blocklist
 from ..core.health import (HEALTH_DEAD, HEALTH_SUSPECT, check_ports_free,
                            check_tun_takeover, connection_health_detail,
@@ -387,6 +389,9 @@ if _QT_OK:
             self._health_tick = 0          # poll_once 滴答计数（3 tick≈15s 探测）
             self._sysproxy_alert = False   # 告警条当前是否在亮系统代理冲突
             self._tun_alert = False        # 告警条当前是否在亮 TUN 接管未生效
+            # U6 容灾信号出口（work21/WIRING.md 落点①的出口侧）：main() 注入
+            # 前台窗的 _failover_feed；独立构造本窗（测试/冒烟）时保持 None。
+            self._failover_feed = None
 
             if orchestrator is not None:
                 self.orchestrator = orchestrator
@@ -425,8 +430,14 @@ if _QT_OK:
                             site_blocklist.blocklist_path(data_dir))
                         return usage, blocklist
 
+                    def _ruleset_state_provider():
+                        data_dir = os.path.dirname(
+                            os.path.abspath(store.path or "client.db"))
+                        return ruleset_cache.current_ruleset_state(data_dir)
+
                     singbox = SingBoxEngine(
                         usage_provider=_usage_provider,
+                        ruleset_state_provider=_ruleset_state_provider,
                         socks_port=self.settings.socks_port,
                         http_port=self.settings.http_port)
                     built = {"openvpn": OpenVPNEngine(out_dir=out_dir)}
@@ -870,6 +881,8 @@ if _QT_OK:
             history.record(self.store, node.id, "verify", True,
                            latency_ms=outcome.latency_ms,
                            exit_ip=node.exit_profile.ip, detail="验出口通过")
+            # U6 §5.4：验真成功清「容灾换下」标记（无标记 no-op）。
+            failover.clear_mark_on_link_success(self.store, node.id, True)
             ep = node.exit_profile
             lat = (f"，延迟 {history.format_latency_ms(outcome.latency_ms)}"
                    if outcome.latency_ms is not None else "")
@@ -1271,6 +1284,11 @@ if _QT_OK:
                 if self.tray is not None:
                     self.tray.showMessage("gate-client 节点疑似已死", text,
                                           QSystemTrayIcon.Warning, 5000)
+                # U6 容灾触发（work21/WIRING.md 落点①）：健康判死喂给容灾
+                # 控制器（住前台窗，main() 注入本出口）；开关关时控制器零
+                # 动作零记录。suspect 分支不喂（§5.1：不触发替换）。
+                if self._failover_feed is not None:
+                    self._failover_feed(failover.REASON_HEALTH_DEAD, node_id)
             elif status == HEALTH_SUSPECT:
                 self._show_info(
                     f"连接可疑：连续 {streak} 次探测失败，仍保持连接、不自动切换。"
@@ -1644,6 +1662,11 @@ if _QT_OK:
                              engines=usage.engines,
                              settings=settings, settings_store=sstore)
         usage.set_backend_window(backend)
+        # U6 容灾接线（work21/WIRING.md 落点②）：健康判死只在后台窗探测
+        # 收尾检测到（_finish_health_probe HEALTH_DEAD 分支），控制器住
+        # 前台窗——把前台窗信号适配器注入后台窗，替换动作经前台窗既有
+        # _run_task 串行通道执行（与用户连接同一管道）。
+        backend._failover_feed = usage._failover_feed
 
         def _fanout(ev):
             usage.bridge.session_event.emit(ev)

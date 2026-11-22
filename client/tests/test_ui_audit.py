@@ -79,98 +79,98 @@ class TestAuditAnchors(DevTreeTestCase):
     """
 
     def test_g1_status_line_shared_by_messages(self):
-        self.assert_anchor(APP, 456, 'self.status_label = QLabel("未连接")')
-        self.assert_anchor(APP, 1329, 'if ev.kind == "connected":')
-        self.assert_anchor(APP, 1335,
+        self.assert_anchor(APP, 467, 'self.status_label = QLabel("未连接")')
+        self.assert_anchor(APP, 1347, 'if ev.kind == "connected":')
+        self.assert_anchor(APP, 1353,
                            'self.status_label.setText(f"已连接：{name}')
-        self.assert_anchor(APP, 1429, "def _show_info(self, text: str):")
-        self.assert_anchor(APP, 1430, "self.status_label.setText(text)")
+        self.assert_anchor(APP, 1447, "def _show_info(self, text: str):")
+        self.assert_anchor(APP, 1448, "self.status_label.setText(text)")
 
     def test_g2_connect_started_unhandled(self):
         self.assert_anchor(ORCH, 104, 'self._emit("connect_started", node_id)')
 
     def test_g3_resort_on_every_task_finish(self):
-        self.assert_anchor(APP, 1417, "self.refresh_pages()")
+        self.assert_anchor(APP, 1435, "self.refresh_pages()")
         self.assert_anchor(HISTORY, 125, "只决定展示顺序")
         self.assert_anchor(HISTORY, 137, "def sorted_nodes")
 
     def test_g4_purge_button_static_label(self):
-        self.assert_anchor(APP, 500, 'QPushButton("一键删废节点")')
+        self.assert_anchor(APP, 511, 'QPushButton("一键删废节点")')
 
     def test_g5_verify_failure_lights_red_bar(self):
-        self.assert_anchor(APP, 1397, 'self._show_alert(f"测速失败：{text}")')
+        self.assert_anchor(APP, 1415, 'self._show_alert(f"测速失败：{text}")')
 
     def test_g6_recent_column_hhmm_only(self):
-        self.assert_anchor(APP, 351, 'time.strftime("%H:%M", time.localtime(last_ts))')
+        self.assert_anchor(APP, 353, 'time.strftime("%H:%M", time.localtime(last_ts))')
 
     def test_g11_empty_page_count_label_only(self):
-        self.assert_anchor(APP, 360, 'f"{len(nodes)} 个节点"')
+        self.assert_anchor(APP, 362, 'f"{len(nodes)} 个节点"')
 
     def test_g12_refresh_pages_no_hidden_count(self):
-        self.assert_anchor(APP, 734, "def refresh_pages(self):")
-        self.assert_anchor(APP, 737, "source=src, include_banned=")
+        self.assert_anchor(APP, 745, "def refresh_pages(self):")
+        self.assert_anchor(APP, 748, "source=src, include_banned=")
 
     def test_g13_action_row_and_window_width(self):
-        self.assert_anchor(APP, 444, "self.resize(1080, 640)")
-        self.assert_anchor(APP, 468, "actions = QHBoxLayout()")
+        self.assert_anchor(APP, 455, "self.resize(1080, 640)")
+        self.assert_anchor(APP, 479, "actions = QHBoxLayout()")
 
     def test_g14_count_label_after_stretch(self):
-        self.assert_anchor(APP, 249, "bar.addStretch(1)")
-        self.assert_anchor(APP, 250, 'self.count_label = QLabel("")')
-        self.assert_anchor(APP, 251, "bar.addWidget(self.count_label)")
+        self.assert_anchor(APP, 251, "bar.addStretch(1)")
+        self.assert_anchor(APP, 252, 'self.count_label = QLabel("")')
+        self.assert_anchor(APP, 253, "bar.addWidget(self.count_label)")
 
     def test_g15_residual_confirm_modals(self):
-        self.assert_anchor(APP, 1030, 'QMessageBox.question(self, "删除节点"')
-        self.assert_anchor(APP, 1088, "QMessageBox.question(")
-        self.assert_anchor(APP, 1104, "QMessageBox.question(")
-        self.assert_anchor(APP, 1502, "QInputDialog.getMultiLineText(")
-        self.assert_anchor(APP, 1521, "QInputDialog.getText(")
+        self.assert_anchor(APP, 1043, 'QMessageBox.question(self, "删除节点"')
+        self.assert_anchor(APP, 1101, "QMessageBox.question(")
+        self.assert_anchor(APP, 1117, "QMessageBox.question(")
+        self.assert_anchor(APP, 1520, "QInputDialog.getMultiLineText(")
+        self.assert_anchor(APP, 1539, "QInputDialog.getText(")
 
     def test_g16_raw_ms_in_health_probe_message(self):
-        self.assert_anchor(APP, 1279, 'f"，延迟 {latency_ms:.0f}ms"')
+        self.assert_anchor(APP, 1297, 'f"，延迟 {latency_ms:.0f}ms"')
         self.assert_anchor(HISTORY, 89, "def format_latency_ms")
 
     def test_g17_alert_bar_no_wrap_no_close(self):
-        self.assert_anchor(APP, 450, 'self.alert_bar = QLabel("")')
+        self.assert_anchor(APP, 461, 'self.alert_bar = QLabel("")')
 
     def test_g18_alert_slot_self_overwrite(self):
-        self.assert_anchor(APP, 773, 'if node.extra.get("quarantined") == "1":')
-        self.assert_anchor(APP, 783, "if not self._health_precheck(node):")
+        self.assert_anchor(APP, 784, 'if node.extra.get("quarantined") == "1":')
+        self.assert_anchor(APP, 794, "if not self._health_precheck(node):")
 
     def test_g19_no_live_table_update_during_batch(self):
-        self.assert_anchor(APP, 912, "self.bridge.progress.emit(")
+        self.assert_anchor(APP, 925, "self.bridge.progress.emit(")
 
     def test_g20_no_binary_check_at_startup(self):
-        self.assert_anchor(APP, 1176, "def _startup_health_check(self):")
-        self.assert_anchor(ENGINE, 159, "未找到 sing-box 可执行文件")
+        self.assert_anchor(APP, 1189, "def _startup_health_check(self):")
+        self.assert_anchor(ENGINE, 164, "未找到 sing-box 可执行文件")
 
     def test_g21_mode_enum_in_message(self):
-        self.assert_anchor(APP, 1136, 'f"接管方式：{mode}。')
-        self.assert_anchor(APP, 480, 'addItem("系统代理", "proxy")')
+        self.assert_anchor(APP, 1149, 'f"接管方式：{mode}。')
+        self.assert_anchor(APP, 491, 'addItem("系统代理", "proxy")')
 
     def test_g22_empty_value_vocabulary(self):
-        self.assert_anchor(APP, 331, 'else "未验"')
-        self.assert_anchor(APP, 338, 'clean_s = "未知"')
-        self.assert_anchor(APP, 342, 'stab_s = "无样本"')
-        self.assert_anchor(APP, 347, 'last_s = "未测"')
+        self.assert_anchor(APP, 333, 'else "未验"')
+        self.assert_anchor(APP, 340, 'clean_s = "未知"')
+        self.assert_anchor(APP, 344, 'stab_s = "无样本"')
+        self.assert_anchor(APP, 349, 'last_s = "未测"')
 
     def test_g23_marks_inside_name_column(self):
-        self.assert_anchor(APP, 326, 'marks = ("📌"')
-        self.assert_anchor(APP, 328, 'active = "● "')
+        self.assert_anchor(APP, 328, 'marks = ("📌"')
+        self.assert_anchor(APP, 330, 'active = "● "')
 
     def test_g9_pin_ban_single_select_only(self):
-        self.assert_anchor(APP, 995, "def toggle_pin(self):")
-        self.assert_anchor(APP, 996, "node = self.selected_node()")
-        self.assert_anchor(APP, 1001, "def toggle_ban(self):")
-        self.assert_anchor(APP, 1007, "def delete_selected(self):")
-        self.assert_anchor(APP, 1010, "page.selected_node_ids() if page else []")
+        self.assert_anchor(APP, 1008, "def toggle_pin(self):")
+        self.assert_anchor(APP, 1009, "node = self.selected_node()")
+        self.assert_anchor(APP, 1014, "def toggle_ban(self):")
+        self.assert_anchor(APP, 1020, "def delete_selected(self):")
+        self.assert_anchor(APP, 1023, "page.selected_node_ids() if page else []")
 
     def test_g10_doubleclick_connect_no_context_menu(self):
-        self.assert_anchor(APP, 268, "window.connect_selected())")
+        self.assert_anchor(APP, 270, "window.connect_selected())")
 
     def test_columns_layout_evidence(self):
-        self.assert_anchor(APP, 227, 'COLUMNS = ("名称", "协议", "出口", "类型",')
-        self.assert_anchor(APP, 258, "self.table = QTableWidget(0, len(self.COLUMNS))")
+        self.assert_anchor(APP, 229, 'COLUMNS = ("名称", "协议", "出口", "类型",')
+        self.assert_anchor(APP, 260, "self.table = QTableWidget(0, len(self.COLUMNS))")
 
 
 class TestAuditAbsence(DevTreeTestCase):
@@ -189,8 +189,8 @@ class TestAuditAbsence(DevTreeTestCase):
     def test_g7_no_search_box(self):
         hits = [i + 1 for i, ln in enumerate(self._all_lines(APP))
                 if "QLineEdit" in ln]
-        self.assertEqual(hits, [124, 127],
-                         f"app.py QLineEdit 出现于 {hits}（预期仅 QSS 124/127），"
+        self.assertEqual(hits, [126, 129],
+                         f"app.py QLineEdit 出现于 {hits}（预期仅 QSS 126/129），"
                          "G7 证据失效，须复审")
 
     def test_g8_no_header_sorting(self):
@@ -201,8 +201,8 @@ class TestAuditAbsence(DevTreeTestCase):
     def test_g10_no_table_context_menu(self):
         hits = [i + 1 for i, ln in enumerate(self._all_lines(APP))
                 if "ContextMenu" in ln]
-        self.assertEqual(hits, [702],
-                         f"app.py ContextMenu 出现于 {hits}（预期仅托盘 702），"
+        self.assertEqual(hits, [713],
+                         f"app.py ContextMenu 出现于 {hits}（预期仅托盘 713），"
                          "G10 证据失效，须复审")
 
     def test_g17_g24_no_wordwrap_no_translator(self):
@@ -217,19 +217,19 @@ class TestIronLaw(DevTreeTestCase):
     """DESIGN.md §4：铁律核查（自动切换=零违例的正面证据）。"""
 
     def test_only_user_initiated_connect(self):
-        self.assert_anchor(APP, 791, 'self._run_task("connect", lambda: orch.connect(node.id))')
+        self.assert_anchor(APP, 802, 'self._run_task("connect", lambda: orch.connect(node.id))')
 
     def test_dropped_copy_disclaims_auto_switch(self):
         self.assert_anchor(ORCH, 160, "已停在原地（不会自动切换）")
 
     def test_health_dead_copy_disclaims_auto_switch(self):
-        self.assert_anchor(APP, 1254, "绝不自动切换")
-        self.assert_anchor(APP, 1268, "连接保持原样、")
-        self.assert_anchor(APP, 1269, "绝不自动换节点")
+        self.assert_anchor(APP, 1267, "绝不自动切换")
+        self.assert_anchor(APP, 1281, "连接保持原样、")
+        self.assert_anchor(APP, 1282, "绝不自动换节点")
 
     def test_restore_last_node_select_only(self):
-        self.assert_anchor(APP, 552, "只选中，")
-        self.assert_anchor(APP, 553, "不自动连接")
+        self.assert_anchor(APP, 563, "只选中，")
+        self.assert_anchor(APP, 564, "不自动连接")
 
     def test_sort_never_connects(self):
         self.assert_anchor(HISTORY, 125, "只决定展示顺序；连接永远由用户点选（铁律）")

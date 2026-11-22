@@ -29,7 +29,9 @@ import sys
 
 from ..core import diag
 from ..core import diag_collect
+from ..core import failover
 from ..core import history
+from ..core import ruleset_cache
 from ..core import settings_store, site_blocklist
 from ..core.health import (check_ports_free, describe_occupied,
                            proxy_conflict, read_system_proxy)
@@ -279,6 +281,8 @@ def cmd_verify(store: Store, args, probe_factory) -> int:
     store.upsert_node(node)
     history.record(store, node.id, "verify", True,
                    exit_ip=node.exit_profile.ip, detail="验出口通过")
+    # U6 §5.4：验真成功清「容灾换下」标记（无标记 no-op；CLI 与 GUI 同口径）。
+    failover.clear_mark_on_link_success(store, node.id, True)
     ep = node.exit_profile
     print(f"出口 {ep.ip} / {ep.country}({ep.country_code}) / {ep.network_type} "
           f"org={ep.org} 干净={ep.is_clean} 脏标记={sorted(ep.dirty) or '-'} "
@@ -326,12 +330,21 @@ def _build_orchestrator(store: Store, probe_factory, engine_factory=None,
                 site_blocklist.blocklist_path(data_dir))
             return usage, blocklist
 
+        def _ruleset_state_provider():
+            # U3（task18）：每次连接现读规则集来源登记与缓存状态（「下次
+            # 连接生效」同款口径）。登记损坏如实抛 ValueError → 引擎包成
+            # EngineError 显式失败。数据目录推导同 _usage_provider。
+            data_dir = os.path.dirname(os.path.abspath(store.path or "client.db"))
+            return ruleset_cache.current_ruleset_state(data_dir)
+
         if settings is not None:
             singbox = SingBoxEngine(usage_provider=_usage_provider,
+                                    ruleset_state_provider=_ruleset_state_provider,
                                     socks_port=settings.socks_port,
                                     http_port=settings.http_port)
         else:
-            singbox = SingBoxEngine(usage_provider=_usage_provider)
+            singbox = SingBoxEngine(usage_provider=_usage_provider,
+                                    ruleset_state_provider=_ruleset_state_provider)
         engines = {"openvpn": OpenVPNEngine(out_dir=out_dir)}
         for proto in SINGBOX_PROTOCOLS:
             engines[proto] = singbox
