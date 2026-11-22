@@ -40,7 +40,7 @@ class TestCliSingboxWiring(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    # 1. 默认接线：键集合恰为五个协议；四个 sing-box 协议共用同一实例
+    # 1. 默认接线：键集合恰为八个协议；七个 sing-box 协议共用同一实例
     def test_default_wiring_registers_both_engines(self):
         from client.core.store import Store
         store = Store(self.db)
@@ -49,12 +49,13 @@ class TestCliSingboxWiring(unittest.TestCase):
         finally:
             store.close()
         self.assertEqual(set(orch.engines.keys()),
-                         {"openvpn", "vless", "ss", "trojan", "vmess"})
+                         {"openvpn", "vless", "ss", "trojan", "vmess",
+                          "hysteria2", "tuic", "wireguard"})
         self.assertIsInstance(orch.engines["openvpn"], OpenVPNEngine)
         singbox = orch.engines["vless"]
         self.assertIsInstance(singbox, SingBoxEngine)
         for proto in SINGBOX_PROTOCOLS:
-            self.assertIs(orch.engines[proto], singbox)   # 一个实例供四协议共用
+            self.assertIs(orch.engines[proto], singbox)   # 一个实例供七协议共用
 
     # 2. 注入优先：engine_factory 给什么就用什么，默认接线不介入
     def test_engine_factory_injection_wins(self):
