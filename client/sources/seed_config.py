@@ -4,10 +4,16 @@
 种子源配置加载（task25 其二：task9 欠账「种子清单结构 + 账本落位」收口）
 ========================================================================
 
-只收口「结构与落位」，不收口「内容」：
-- 真实种子清单由主会话在集成时给定——本模块不内置、不编造任何种子
-  地址（简报红线）；配置文件里有什么就加载什么，没有就是「未启用」。
-- 不做定时/自动联网：本模块只读本地配置文件，搜集触发形态不在本段
+只收口「结构与落位」，task34 起兼收「默认内容」：
+- task25 口径「本模块不内置、不编造任何种子地址」由 task34 正式解除：
+  主会话给定的 5 个公开候选已逐个实测验活（HTTP GET → 既有解析路径产出
+  节点数 > 0，记录在 work34/seeds-verification.md），验活通过的 2 条落为
+  `default_seeds()` 内置默认集；验不了/失效的绝不进默认集。用户配置
+  （collect_seeds.json）存在时一律以用户文件为准（不覆盖、不合并），
+  默认集只在「无用户配置」时作为种子来源（接线在 ui/cli.py
+  _sources_collect 单点）。
+- 不做定时/自动联网：本模块只读本地配置文件 + 静态默认集，零网络调用
+  （验活在开发期做，运行时不发任何请求）；搜集触发形态不在本段
   （task9 DESIGN §7.3）。
 
 交付三件：
@@ -211,3 +217,44 @@ def load_seed_config(path: str) -> tuple:
             "enabled": entry.get("enabled", True),
         })
     return seeds, (STATUS_OK if seeds else STATUS_EMPTY)
+
+
+# ---------------------------------------------------------------------------
+# 内置默认种子集（task34：主会话给定候选逐个验活后落地）
+# ---------------------------------------------------------------------------
+# 只收验活通过者：逐个实测（HTTP GET 超时 15 秒最多读 2 MB → 既有解析
+# 路径 format_import.import_any_text 产出节点数 > 0 才判活），验活记录
+# = work34/seeds-verification.md（活 2 / 失效 3：mfuu-v2ray、pawdroid-free
+# 超时，aiboboxx-v2rayfree 404——三条不进默认集，只留验活表备查；
+# 宁可默认集为空，也不许放未验源）。地址为公开开源项目的公开地址，
+# 可出现在代码与文档（简报口径）；抓取到的节点内容不落盘。
+_DEFAULT_SEEDS = (
+    {
+        "id": "nomorewalls",
+        "category": "sub",
+        "address": "https://raw.githubusercontent.com/peasoft/NoMoreWalls"
+                   "/master/list.txt",
+    },
+    {
+        "id": "freefq-free",
+        "category": "sub",
+        "address": "https://raw.githubusercontent.com/freefq/free/master/v2",
+    },
+)
+
+
+def default_seeds() -> list:
+    """内置默认种子集（task34）：验活通过的候选，条目形状与
+    load_seed_config 产出一致（id/category/address + enabled 恒 True），
+    collector.run_collection 的种子结构校验直接可吃。
+
+    - 只收验活通过者（见 _DEFAULT_SEEDS 注记与 work34/seeds-verification
+      .md）；验不了/失效的候选绝不进默认集。
+    - 每次返回全新 dict 列表（调用方就地改不动内部常量）。
+    - 消费口径：仅当用户没有 collect_seeds.json（STATUS_NOT_CONFIGURED）
+      时作为种子来源（ui/cli.py _sources_collect 单点接线）；用户已有
+      配置文件（含空清单/全停用）一律以用户文件为准，不覆盖、不合并。
+    - 纯数据函数：零网络、零文件 IO、不 import client 包（模块既有口径
+      不变）；永不自动切换节点——种子来源只影响「拉哪些清单」。
+    """
+    return [{**entry, "enabled": True} for entry in _DEFAULT_SEEDS]

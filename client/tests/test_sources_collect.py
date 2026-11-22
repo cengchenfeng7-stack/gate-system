@@ -9,10 +9,12 @@
 1. 假种子文件（*.example 地址 only）+ 注假 fetch_fn 跑通一整轮：
    报告数字逐行对账、账本 R1/R2/R3/R8 记账与跳过不建档、溯源四键、
    账本 save/load 回读一致且与种子配置同目录。
-2. 未配置（not_configured）/ 空清单 / 全停用 → 打印「未启用」退出 0，
-   不是故障、不告警；停用种子跳过（配置停用不进轮、账本停用由
-   run_collection 自己跳过，双闸各管各的）；损坏 JSON / 非法 schema /
-   损坏账本 → 显式报错退出 2（seed_config / collector 既有口径，不静默吞）。
+2. 未配置（not_configured，task34 起默认集为空时）/ 空清单 / 全停用 →
+   打印「未启用」退出 0，不是故障、不告警；无配置且默认集非空 → 用内置
+   默认种子集（task34；形态与优先级归 test_seed_defaults.py）；停用种子
+   跳过（配置停用不进轮、账本停用由 run_collection 自己跳过，双闸各管
+   各的）；损坏 JSON / 非法 schema / 损坏账本 → 显式报错退出 2
+   （seed_config / collector 既有口径，不静默吞）。
 3. 候选 → 验真 → 入库管道：验真失败（链路死 / 出口污染 / 引擎起不来）
    不入库、库内节点数不变，只进 dead_candidates 记账（stage="verify"）；
    验真通过才入库（Store 既有口径），同身份旧档按 §5 字段口径合并
@@ -440,7 +442,11 @@ class TestCollectStates(CollectCase):
 
     def test_not_configured_exit_zero(self):
         fetch = FetchLog()
-        rc, out, err, _, _ = self._collect(fetch)
+        # task34 起无用户配置走内置默认种子集（真实地址形态）；本测试锁
+        # 「未配置且默认集为空 → 未启用退出 0」的兜底口径不变。默认集
+        # 非空的形态与优先级归 test_seed_defaults.py（work34 验收）。
+        with mock.patch.object(SC, "default_seeds", lambda: []):
+            rc, out, err, _, _ = self._collect(fetch)
         self.assertEqual(rc, 0, err)
         self.assertIn("未启用", out)
         self.assertNotIn("错误", out + err)              # 不是故障、不告警

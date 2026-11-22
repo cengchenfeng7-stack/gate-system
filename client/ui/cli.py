@@ -578,10 +578,19 @@ def _sources_collect(store: Store, fetcher=None, engine_factory=None,
     except ValueError as exc:
         return _err(str(exc))
     if status == seed_src.STATUS_NOT_CONFIGURED:
-        print("搜集未启用：还没有种子配置（collect_seeds.json）——按 schema "
-              "填一张种子表即接入；真实清单由主会话在集成时给定。")
-        return 0
-    if status == seed_src.STATUS_EMPTY:
+        # task34：无用户配置 → 用内置默认种子集（seed_config.default_seeds，
+        # 逐个验活名单，记录见 work34/seeds-verification.md）；默认集也为
+        # 空 → 照旧「未启用」早退。用户已有配置文件（含空清单/全停用）
+        # 一律以用户文件为准，不覆盖、不合并——下面 EMPTY / 全停用两个
+        # 早退分支原样不动，就是这条口径的执行面。
+        seeds = seed_src.default_seeds()
+        if not seeds:
+            print("搜集未启用：还没有种子配置（collect_seeds.json），且内置"
+                  "默认种子集为空——按 schema 填一张种子表即接入。")
+            return 0
+        print(f"未配置 collect_seeds.json：使用内置默认种子集（{len(seeds)} 个，"
+              "为逐个实测验活后的名单）；建一张用户种子表即完全取代默认集。")
+    elif status == seed_src.STATUS_EMPTY:
         print("搜集未启用：种子清单为空（collect_seeds.json 的 seeds 是空数组）。")
         return 0
     # 启用种子过滤：配置 enabled=false 的不进轮；账本停用的由 run_collection
