@@ -28,10 +28,8 @@ import re
 import urllib.request
 from dataclasses import dataclass
 
-import yaml
 from urllib.parse import urlsplit
 
-from . import clash_import
 from . import manual
 
 
@@ -83,6 +81,11 @@ def _try_clash_import(text: str, source: str = "manual",
     直导入并包装成 SubscriptionResult；否则返回 None，交回链接行流程。
     识别只认结构、不认文件名；YAML 解不出或结构不符都不拦截。"""
     stripped = text[1:] if text.startswith("\ufeff") else text
+    try:
+        import yaml
+        from . import clash_import
+    except ImportError:
+        return None
     try:
         doc = yaml.safe_load(stripped)
     except yaml.YAMLError:
