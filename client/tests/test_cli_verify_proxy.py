@@ -26,7 +26,7 @@ VLESS_LINK = ("vless://11111111-2222-3333-4444-555555555555"
               "@example.com:443?security=tls#vless-proxy-verify")
 
 DEFAULT_PROXY = "http://127.0.0.1:7897"      # SingBoxEngine 默认 http_port（探针走 HTTP 入站）
-CUSTOM_PROXY = "http://127.0.0.1:18089"       # 构造参数改过端口的
+CUSTOM_PROXY = "http://127.0.0.1:18095"       # 构造参数改过端口的；18089 已被本机 ZCode 中继占用
 
 
 class FakeSingBoxEngine(SingBoxEngine):
@@ -115,7 +115,7 @@ class TestVerifyThroughProxy(unittest.TestCase):
 
     # 3. 自定义端口 → proxy 用引擎实例自己的 http_proxy_url，不许写死 7897
     def test_custom_http_port_is_used_not_hardcoded(self):
-        rc, out, err = self._connect_vless(FakeSingBoxEngine(http_port=18089))
+        rc, out, err = self._connect_vless(FakeSingBoxEngine(http_port=18095))
         self.assertEqual(rc, 0, err)
         self.assertIn("connected", out)
         self.assertEqual(self.rec.make_real_args, [CUSTOM_PROXY])
