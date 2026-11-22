@@ -159,7 +159,9 @@ class TestFeed(unittest.TestCase):
         self.assertEqual(hosts, {"vpn123456.opengw.net", "vpn99999.opengw.net"})
         n = next(n for n in nodes if n.host.startswith("vpn123456"))
         self.assertEqual(n.protocol, "openvpn")
-        self.assertEqual(n.source, "vpngate_feed")   # feed 页，不与 OpenVPN 页合并
+        # 自 task23 起行为反转、依据 work8/DESIGN §7：旧键 vpngate_feed 退役，
+        # feed 解析产物落 VPNGate 合并页（work8/DESIGN §1）。
+        self.assertEqual(n.source, "vpngate")
         self.assertEqual(n.port, 443)
         self.assertEqual(n.extra["config_format"], "b64")
         self.assertEqual(n.metrics.sessions, 5)
@@ -214,7 +216,9 @@ class TestManual(unittest.TestCase):
     def test_ovpn_text(self):
         n = manual_src.parse_ovpn_text(make_ovpn("tcp", 1443, "7.7.7.7"), name="mine.ovpn")
         self.assertEqual(n.protocol, "openvpn")
-        self.assertEqual(n.source, "openvpn")   # .ovpn 一律归 OpenVPN 页
+        # 自 task23 起行为反转、依据 work8/DESIGN §7：.ovpn 从 openvpn 页
+        # 改落 VPNGate 合并页（旧键 openvpn 退役）。
+        self.assertEqual(n.source, "vpngate")
         self.assertEqual(n.host, "7.7.7.7")
         self.assertEqual(n.port, 1443)
         self.assertEqual(n.extra["config_format"], "text")

@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """source_registry 离线测试：登记增删查、首次登记导入、二次更新合并
-（新增/消失/保留样本）、一键更新失败库不变、镜像范围、回归清理。
+（新增/消失/保留样本）、一键更新失败库不变、feed 戳归属范围、回归清理。
+（task23 落页改写：feed_mirror 类型废除，feed 落 VPNGate 合并页——
+自 task23 起行为反转、依据 work8/DESIGN §7；「手导永不标消失」「同端点
+合并保验真」两个语义原样保留，work8/DESIGN §5.2。）
 按任务书红线：拉取动作全部注入假拉取函数，样本全部自构造
 （example.com / RFC 5737 文档段 / 假 uuid / 假密钥），零联网、不读用户
 真实订阅地址或文件、无自动测速/自动选择逻辑。"""
@@ -68,9 +71,10 @@ def mirror_json(*hosts_ips):
 
 F1, F2, F3, F4 = ("fake1.opengw.net", "fake2.opengw.net",
                   "fake3.opengw.net", "fake4.opengw.net")
-F1_ID = make_node_id("vpngate_feed", "openvpn", F1, 443)
-F2_ID = make_node_id("vpngate_feed", "openvpn", F2, 443)
-F3_ID = make_node_id("vpngate_feed", "openvpn", F3, 443)
+# task23 落页：feed 解析默认 source=vpngate（旧 vpngate_feed 键退役）
+F1_ID = make_node_id("vpngate", "openvpn", F1, 443)
+F2_ID = make_node_id("vpngate", "openvpn", F2, 443)
+F3_ID = make_node_id("vpngate", "openvpn", F3, 443)
 
 
 def snap(store):
@@ -136,14 +140,18 @@ class TestRegistryCrud(unittest.TestCase):
     def test_register_feed_singleton_default_address(self):
         e = self.reg.register("feed")
         self.assertEqual(e["address"], sr.FEED_DEFAULT_ADDRESS)  # 自动填官方
-        self.assertEqual(e["page"], "vpngate_feed")
+        self.assertEqual(e["page"], "vpngate")   # 落 VPNGate 合并页（task23）
         with self.assertRaises(ValueError):              # feed 单例
             self.reg.register("feed")
-        mirror = self.reg.register("feed_mirror")        # 镜像是另一种单例，可单独登记
-        self.assertEqual(mirror["id"], "feed-mirror")
-        self.assertEqual(mirror["page"], "openvpn")
-        with self.assertRaises(ValueError):              # 镜像也是单例
-            self.reg.register("feed_mirror")
+
+    def test_feed_mirror_type_abolished(self):
+        """自 task23 起行为反转、依据 work8/DESIGN §7（§5.1）：feed_mirror
+        登记类型废除，两入口合一为 feed（同一份 feed 落 VPNGate 合并页，
+        不再落「OpenVPN 页」——该页键已随合并退役）。"""
+        reg = sr.SourceRegistry()
+        with self.assertRaises(ValueError):              # 类型已从 ENTRY_TYPES 删除
+            reg.register("feed_mirror")
+        self.assertEqual(sr.ENTRY_TYPES, ("subscription", "feed"))
 
     def test_register_duplicate_subscription_url(self):
         self.reg.register("subscription", SUB_URL)
@@ -232,7 +240,7 @@ class TestFirstImport(unittest.TestCase):
         self.assertTrue(rep.ok, rep.error)
         self.assertEqual((rep.added, rep.feed_from), (3, "登记地址"))
         self.assertEqual(rep.parser, "feed.parse_feed_to_nodes")
-        nodes = store.list_nodes(source="vpngate_feed")
+        nodes = store.list_nodes(source="vpngate")
         self.assertEqual({n.id for n in nodes},
                          {F1_ID, F2_ID, F3_ID})
         n = store.get_node(F1_ID)
@@ -243,22 +251,6 @@ class TestFirstImport(unittest.TestCase):
         self.assertEqual(n.extra["country"], "Fake Country")
         self.assertEqual(n.extra["country_code"], "FC")
         self.assertTrue(n.config_ref.startswith("Y2xpZW50"))  # b64 配置原文
-
-    def test_feed_mirror_first_import_lands_openvpn_page(self):
-        store = Store(":memory:")
-        reg = sr.SourceRegistry()
-        eid = reg.register("feed_mirror")["id"]
-        self.assertEqual(reg.get(eid)["page"], "openvpn")
-        rep = sr.update_entry(reg, store, eid, fetch_fn=lambda e: feed_csv(
-            feed_row(F1, "192.0.2.11"), feed_row(F2, "192.0.2.12")), now=1.0)
-        self.assertTrue(rep.ok, rep.error)
-        nodes = store.list_nodes(source="openvpn")
-        self.assertEqual(len(nodes), 2)               # 落 OpenVPN 页
-        for n in nodes:
-            self.assertTrue(n.id.startswith("openvpn:openvpn:"))
-            self.assertEqual(n.extra["registry_entry"], "feed-mirror")
-        self.assertEqual(store.list_nodes(source="vpngate_feed"), [])  # 不碰 feed 页
-
 
 class TestSecondUpdate(unittest.TestCase):
     """二次更新：新增 / 消失 / 更新计数与本地状态保住（DESIGN §5、§8）。"""
@@ -382,22 +374,26 @@ class TestSecondUpdate(unittest.TestCase):
         self.assertEqual(n.metrics.latency_ms, 123.0)    # 本地侧：实测保住
 
 
-class TestMirrorScope(unittest.TestCase):
-    """feed_mirror 的 stamp 归属规则（DESIGN §4.2、§7）。"""
+class TestFeedScope(unittest.TestCase):
+    """feed 的 stamp 归属规则（work8/DESIGN §5.2；自 task23 起 feed 从
+    「整页归属」改为「只认登记戳」——合并页混着手导 .ovpn，没戳的绝不碰；
+    迁移已给 feed 系存量补戳，归属集合与合并前等价，见 work23/test_merge_landing）。"""
 
-    def test_mirror_never_marks_hand_imported(self):
+    def test_feed_never_marks_hand_imported(self):
+        """「手导永不标消失」保护原样保留（§7 语义不变）：手导 .ovpn 没有
+        登记戳，不在 feed 归属范围，feed 拉不到它也绝不标消失。"""
         store = Store(":memory:")
         hand = manual.parse_ovpn_text(
             "client\ndev tun\nproto tcp\nremote fake5.opengw.net 443\n",
-            name="手导.ovpn", source="openvpn")
+            name="手导.ovpn")                    # 默认 source=vpngate（task23）
         store.upsert_node(hand)
         store.add_sample(VerifySample(node_id=hand.id, kind="verify",
                                       success=True, ts=500.0, latency_ms=88.0))
         reg = sr.SourceRegistry()
-        eid = reg.register("feed_mirror")["id"]
+        eid = reg.register("feed")["id"]
         rep1 = sr.update_entry(reg, store, eid, fetch_fn=lambda e: feed_csv(
             feed_row(F1, "192.0.2.11"), feed_row(F2, "192.0.2.12")), now=1.0)
-        self.assertEqual(rep1.added, 2)                  # 只管镜像喂的
+        self.assertEqual(rep1.added, 2)                  # 只管 feed 喂的
         rep2 = sr.update_entry(reg, store, eid, fetch_fn=lambda e: feed_csv(
             feed_row(F1, "192.0.2.11")), now=2.0)
         self.assertEqual(rep2.gone, 1)                   # fake2 消失
@@ -405,27 +401,28 @@ class TestMirrorScope(unittest.TestCase):
         self.assertNotIn("source_gone", hand_after.extra)   # 手导的永不标消失
         self.assertNotIn("registry_entry", hand_after.extra)
         self.assertEqual(len(store.samples_for(hand.id)), 1)
-        self.assertEqual({g.id for g in reg.gone_nodes(store, eid)},
-                         {make_node_id("openvpn", "openvpn", F2, 443)})
+        self.assertEqual({g.id for g in reg.gone_nodes(store, eid)}, {F2_ID})
 
-    def test_mirror_merges_with_same_endpoint_hand_ovpn(self):
-        """手导 .ovpn 与镜像节点同 host:port → 同 id：按 §5 合并（验真状态
-        保住、配置换成官方 b64），不是当新节点盖掉（§4.2 全库同身份合并）。"""
+    def test_feed_merges_with_same_endpoint_hand_ovpn(self):
+        """「同端点合并保验真」语义原样保留（§7；work8/DESIGN §5.2）：手导
+        .ovpn 与 feed 节点同 host:port → 同 id（合并后同一 canonical 键）：
+        按 §5 合并（验真状态保住、配置换成官方 b64、此后归 feed 管），
+        不是当新节点盖掉（§4.2 全库同身份合并）。"""
         store = Store(":memory:")
         hand = manual.parse_ovpn_text(
             "client\ndev tun\nproto tcp\nremote fake1.opengw.net 443\n",
-            name="手导.ovpn", source="openvpn")
+            name="手导.ovpn")
         store.upsert_node(hand)
         mark_verified(store, hand.id)
         store.add_sample(VerifySample(node_id=hand.id, kind="verify",
                                       success=True, ts=500.0, latency_ms=88.0))
         reg = sr.SourceRegistry()
-        eid = reg.register("feed_mirror")["id"]
+        eid = reg.register("feed")["id"]
         rep = sr.update_entry(reg, store, eid, fetch_fn=lambda e: feed_csv(
             feed_row(F1, "192.0.2.11"), feed_row(F2, "192.0.2.12")), now=1.0)
         self.assertEqual((rep.added, rep.updated), (1, 1))   # fake2 新 / fake1 顺同一记录更新
         n = store.get_node(hand.id)
-        self.assertEqual(n.extra["registry_entry"], eid)     # 此后归镜像管
+        self.assertEqual(n.extra["registry_entry"], eid)     # 此后归 feed 管
         self.assertEqual(n.extra["config_format"], "b64")    # 来源侧：官方配置
         self.assertEqual(n.exit_profile.ip, "203.0.113.9")   # 本地侧：验真保住
         self.assertEqual(n.metrics.latency_ms, 123.0)

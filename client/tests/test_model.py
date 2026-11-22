@@ -42,15 +42,18 @@ class TestModel(unittest.TestCase):
         self.assertEqual(Node.from_json(n.to_json()), n)
 
     def test_make_id_stable_and_discriminated(self):
-        a = make_node_id("vpngate_feed", "openvpn", "h.example", 443)
-        self.assertEqual(a, make_node_id("vpngate_feed", "openvpn", "h.example", 443))
+        a = make_node_id("vpngate", "openvpn", "h.example", 443)
+        self.assertEqual(a, make_node_id("vpngate", "openvpn", "h.example", 443))
         b = make_node_id("manual", "vless", "h.example", 443, "uuid-1")
         c = make_node_id("manual", "vless", "h.example", 443, "uuid-2")
         self.assertNotEqual(b, c)
         self.assertTrue(b.startswith("manual:vless:h.example:443:"))
-        # 来源是 ID 第一段：同端点不同来源 = 不同 ID
-        self.assertNotEqual(make_node_id("openvpn", "openvpn", "h.example", 443),
-                            make_node_id("vpngate_feed", "openvpn", "h.example", 443))
+        # 来源是 ID 第一段：同端点跨页 = 不同 ID。
+        # 自 task23 起行为反转、依据 work8/DESIGN §7：openvpn / vpngate_feed
+        # 两个旧来源键退役（同页同端点的 feed 节点与手导 .ovpn 同 ID），
+        # 跨页区分由 vpngate / manual / pipeline 承担。
+        self.assertNotEqual(make_node_id("vpngate", "openvpn", "h.example", 443),
+                            make_node_id("manual", "openvpn", "h.example", 443))
 
     def test_from_dict_defaults_and_scene_filter(self):
         n = Node.from_dict({"id": "x", "scenes": ["support", "bogus"]})

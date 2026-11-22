@@ -88,7 +88,7 @@ def bad_verifier(node):
 
 def seed(store):
     store.upsert_node(Node(id="ov1", name=" ovpn节点", protocol="openvpn",
-                           source="openvpn", host="h1", port=1194))
+                           source="vpngate", host="h1", port=1194))
     store.upsert_node(Node(id="m1", name="手动节点", protocol="openvpn",
                            source="manual", host="h2", port=443, scenes={"ai"}))
     store.upsert_node(Node(id="m2", name="隔离节点", protocol="openvpn",
@@ -132,13 +132,15 @@ class TestGuiApp(unittest.TestCase):
         return page
 
     # ---------------- 页面结构 ----------------
-    def test_four_pages_source_split(self):
+    def test_three_pages_source_split(self):
+        """自 task23 起行为反转、依据 work8/DESIGN §7：四页 → 三页
+        （OpenVPN 页与 VPNGate feed 页合并为 vpngate 一页）。"""
         win, _eng, _store = self.make_window()
-        self.assertEqual(win.tabs.count(), 4)
-        self.assertEqual(win.pages["openvpn"].table.rowCount(), 1)
+        self.assertEqual(win.tabs.count(), 3)
+        self.assertEqual(set(win.pages), {"vpngate", "manual", "pipeline"})
+        self.assertEqual(win.pages["vpngate"].table.rowCount(), 1)
         self.assertEqual(win.pages["manual"].table.rowCount(), 1)  # 隔离默认隐藏
         self.assertEqual(win.pages["pipeline"].table.rowCount(), 1)
-        self.assertEqual(win.pages["vpngate_feed"].table.rowCount(), 0)
 
     def test_quarantine_toggle(self):
         win, _eng, _store = self.make_window()
@@ -161,7 +163,7 @@ class TestGuiApp(unittest.TestCase):
     # ---------------- 会话 ----------------
     def test_connect_disconnect(self):
         win, _eng, _store = self.make_window()
-        self.select(win, "openvpn")
+        self.select(win, "vpngate")
         win.connect_selected()
         self.pump()
         self.assertEqual(win.orchestrator.state, Orchestrator.CONNECTED)
@@ -174,7 +176,7 @@ class TestGuiApp(unittest.TestCase):
 
     def test_verify_failed_alert(self):
         win, _eng, _store = self.make_window(verifier=bad_verifier)
-        self.select(win, "openvpn")
+        self.select(win, "vpngate")
         win.connect_selected()
         self.pump()
         self.assertEqual(win.orchestrator.state, Orchestrator.IDLE)
@@ -183,7 +185,7 @@ class TestGuiApp(unittest.TestCase):
 
     def test_drop_poll_alert(self):
         win, eng, _store = self.make_window()
-        self.select(win, "openvpn")
+        self.select(win, "vpngate")
         win.connect_selected()
         self.pump()
         self.assertEqual(win.orchestrator.state, Orchestrator.CONNECTED)
@@ -203,7 +205,7 @@ class TestGuiApp(unittest.TestCase):
         win._run_task = lambda tag, fn: win._on_task_finished(
             tag, (True, fn()))
         self.addCleanup(win.close)
-        self.select(win, "openvpn")
+        self.select(win, "vpngate")
         win.connect_selected()
         self.pump()
         self.assertEqual(win.orchestrator.state, Orchestrator.IDLE)
@@ -219,7 +221,7 @@ class TestGuiApp(unittest.TestCase):
         orch = Orchestrator(store, {"openvpn": eng}, ok_verifier)
         win = app_mod.MainWindow(store, orchestrator=orch, engines={"openvpn": eng})
         self.addCleanup(win.close)
-        self.select(win, "openvpn")
+        self.select(win, "vpngate")
         win.connect_selected()
         deadline = time.time() + 10
         while time.time() < deadline and (
@@ -238,7 +240,7 @@ class TestGuiApp(unittest.TestCase):
     # ---------------- 节点操作 ----------------
     def test_pin_toggle(self):
         win, _eng, store = self.make_window()
-        self.select(win, "openvpn")
+        self.select(win, "vpngate")
         win.toggle_pin()
         self.assertTrue(store.get_node("ov1").pinned)
         win.toggle_pin()
@@ -248,7 +250,7 @@ class TestGuiApp(unittest.TestCase):
         """OpenVPN 未连接时测不了：如实提示、且不许记假样本（旧实现拿
         没启动的引擎代理地址乱测，测谁都全灭——2026-11-20 真机教训）。"""
         win, _eng, store = self.make_window()
-        self.select(win, "openvpn")
+        self.select(win, "vpngate")
         win.verify_selected()
         self.pump()
         self.assertIn("隧道模式", win.status_label.text())
@@ -412,7 +414,7 @@ class TestGuiApp(unittest.TestCase):
         win._busy = False
 
         # 会话连接中：经真连接流程进入 CONNECTED
-        self.select(win, "openvpn")
+        self.select(win, "vpngate")
         win.connect_selected()
         self.pump()
         self.assertEqual(win.orchestrator.state, Orchestrator.CONNECTED)

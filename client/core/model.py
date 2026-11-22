@@ -20,12 +20,14 @@ from typing import Optional
 
 SCENES = ("support", "ai", "games", "download")
 
-# 来源 = 第一组织维度（用户定，2026-11-19）：四个独立“页面”，一个节点
+# 来源 = 第一组织维度（用户定，2026-11-19）：独立“页面”，一个节点
 # 只归属它进来的那一页，协议重叠也不合并。四场景只是页内徽标/过滤。
-SOURCES = ("openvpn", "vpngate_feed", "manual", "pipeline")
+# task8/task23 落页（work8/DESIGN §1）：OpenVPN 页与 VPNGate feed 页本
+# 是同一份 feed，合并为「VPNGate 来源页」（canonical 键 vpngate，旧两键
+# openvpn / vpngate_feed 退役，存量由 sources/landing.py 启动迁移）。
+SOURCES = ("vpngate", "manual", "pipeline")
 SOURCE_LABELS = {
-    "openvpn": "OpenVPN 节点页",
-    "vpngate_feed": "VPN Gate feed 页",
+    "vpngate": "VPNGate 来源页",
     "manual": "手动导入页",
     "pipeline": "自家流水线产物页",
 }
@@ -96,7 +98,7 @@ class Node:
     id: str
     name: str
     protocol: str                          # openvpn / sstp / vless / ss / trojan ...
-    source: str                            # SOURCES 之一：openvpn/vpngate_feed/manual/pipeline
+    source: str                            # SOURCES 之一：vpngate/manual/pipeline
     host: str = ""
     port: int = 0
     # 原始配置载荷：openvpn=b64 或明文（见 extra["config_format"]）、

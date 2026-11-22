@@ -322,14 +322,14 @@ def _check_openvpn(g) -> CheckResult:
     found = g("openvpn_found", _MISSING)
     if not needed:
         return CheckResult("openvpn_binary", True,
-                           "OpenVPN 页没有节点，此项不要求 openvpn")
+                           "VPNGate 页没有 OpenVPN 节点，此项不要求 openvpn")
     if found is _MISSING:
         return _skip("openvpn_binary", "openvpn 二进制探测结果", "openvpn_found")
     if found:
-        return CheckResult("openvpn_binary", True, "openvpn 已找到——OpenVPN 页可用")
+        return CheckResult("openvpn_binary", True, "openvpn 已找到——VPNGate 页可用")
     return CheckResult(
         "openvpn_binary", False,
-        "找不到 openvpn——OpenVPN 页的节点连不了（其他页不受影响）。"
+        "找不到 openvpn——VPNGate 页的 OpenVPN 节点连不了（其他页不受影响）。"
         "安装 OpenVPN Community，或用环境变量 OPENVPN_BIN 指定路径。")
 
 

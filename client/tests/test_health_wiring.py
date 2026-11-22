@@ -156,7 +156,7 @@ class TestCliHealthPrecheck(unittest.TestCase):
         try:
             rc, out, err = run_cli(
                 ["--db", self.db, "connect",
-                 "vpngate_feed:openvpn:vpn123456.opengw.net:443"],
+                 "vpngate:openvpn:vpn123456.opengw.net:443"],
                 probe_factory=fake_probe_factory,
                 engine_factory=lambda: {"openvpn": FakeEngine()})
         finally:

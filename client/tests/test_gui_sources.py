@@ -71,12 +71,19 @@ class TestSourcesGui(unittest.TestCase):
     def _action_texts(self, source):
         return [t for t, _ in self.win.pages[source]._import_actions()]
 
-    # 1. 每页都有「更新已登记来源」；feed/OpenVPN 页各有登记入口
+    # 1. 每页都有「更新已登记来源」；合并页唯一登记入口是「登记并更新 feed」
     def test_buttons_exist(self):
-        for source in ("openvpn", "vpngate_feed", "manual"):
+        # 自 task23 起行为反转、依据 work8/DESIGN §7（§5.1）：「登记 feed
+        # 镜像」入口废除，feed 两页合一，登记入口收敛为「登记并更新 feed」。
+        for source in ("vpngate", "manual"):
             self.assertIn("更新已登记来源", self._action_texts(source))
-        self.assertIn("登记并更新 feed", self._action_texts("vpngate_feed"))
-        self.assertIn("登记 feed 镜像", self._action_texts("openvpn"))
+        self.assertIn("登记并更新 feed", self._action_texts("vpngate"))
+        for source in ("vpngate", "manual", "pipeline"):
+            self.assertNotIn("登记 feed 镜像", self._action_texts(source))
+        # 合并页带「登记」字样的按钮恰一个（单入口口径）
+        register_buttons = [t for t in self._action_texts("vpngate")
+                            if t.startswith("登记")]
+        self.assertEqual(register_buttons, ["登记并更新 feed"])
 
     # 2. 登记表落在节点库同目录 sources.json
     def test_registry_path_next_to_db(self):
@@ -102,14 +109,15 @@ class TestSourcesGui(unittest.TestCase):
 
     # 5. feed 登记更新：按钮走的工作线程同步替身，状态栏显示汇总
     def test_feed_register_and_update_via_button(self):
-        self.win.tabs.setCurrentWidget(self.win.pages["vpngate_feed"])
+        self.win.tabs.setCurrentWidget(self.win.pages["vpngate"])
         self.win.register_and_update_feed(
             fetch_fn=lambda e: _feed_csv(
                 _feed_row("f1.opengw.net", "192.0.2.11")))
         self.assertIn("新增 1", self.win.status_label.text())
-        feed_nodes = self.store.list_nodes(source="vpngate_feed")
-        self.assertEqual(len(feed_nodes), 1)
-        self.assertEqual(feed_nodes[0].host, "f1.opengw.net")
+        # task23 落页：feed 更新只影响 feed 系节点；合并页上另有 seed 的
+        # ov1（四页时代它落 openvpn 页，合并后同页）——断言 f1 已落合并页。
+        hosts = {n.host for n in self.store.list_nodes(source="vpngate")}
+        self.assertEqual(hosts, {"f1.opengw.net", "h1"})
 
 
 if __name__ == "__main__":

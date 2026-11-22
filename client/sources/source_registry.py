@@ -3,9 +3,11 @@
 """
 来源登记原型（sources/source_registry.py 阶段二前置）
 ======================================================
-来源「登记制」：可再拉取的来源（订阅 URL / VPN Gate feed / feed→OpenVPN
-镜像）把地址登记下来，一键更新；更新时与库内已有节点**按身份合并**——
-已验出的出口/延迟样本不丢，新节点进来、消失的节点标记而不是直接删。
+来源「登记制」：可再拉取的来源（订阅 URL / VPN Gate feed）把地址登记
+下来，一键更新；更新时与库内已有节点**按身份合并**——已验出的出口/延迟
+样本不丢，新节点进来、消失的节点标记而不是直接删。
+（task8/task23 落页：feed→OpenVPN 镜像条目废除，两入口合一为 feed；
+存量 sources.json 由 sources/landing.py 启动迁移，work8/DESIGN §5。）
 设计全文见本目录 DESIGN.md；已集成进 client 包（task3 原型落地 v0.6.0）：不发任何网络请求除非
 真实调用方显式使用默认拉取函数（测试一律注入假拉取函数，零联网）。
 
@@ -31,14 +33,15 @@ from dataclasses import dataclass
 
 from ..core.model import Node
 
-ENTRY_TYPES = ("subscription", "feed", "feed_mirror")
+# task8/task23 落页（work8/DESIGN §5.1）：feed_mirror 类型废除，两入口
+# 合一——同一份 VPNGate feed 只剩「feed」一个登记入口，落 VPNGate 合并页。
+ENTRY_TYPES = ("subscription", "feed")
 
 # 类型 → 来源页归属：来源第一维度（用户定 2026-11-19），节点落哪页 =
 # 产出 Node 的 source 字段，由 type 唯一决定，不可配。
 ENTRY_PAGE = {
     "subscription": "manual",        # 手动导入页（D1：订阅导入归手动页）
-    "feed": "vpngate_feed",          # VPN Gate feed 页
-    "feed_mirror": "openvpn",        # OpenVPN 节点页（§7 镜像）
+    "feed": "vpngate",               # VPNGate 来源页（合并页，task8/task23）
 }
 
 # VPN Gate feed 官方地址与回退镜像。出处是一级资料：自家流水线天天在拉
@@ -51,7 +54,11 @@ FEED_FALLBACK_ADDRESS = ("https://raw.githubusercontent.com/fdciabdul/"
 # 本地侧 extra 白名单：这些键由 verify.py 写在节点行上（orig_name:323、
 # quarantined/quarantine_reason:330-334），来源解析永远不产它们——
 # 刷新合并时必须从库内旧节点带回，否则一次刷新就洗掉验真成果。
-_LOCAL_EXTRA_KEYS = ("orig_name", "quarantined", "quarantine_reason")
+# merged_superseded 是 task8 无损兜底快照（work8/DESIGN §3.9，键=旧记录
+# id 的整记录原样）：task23 落页起入白名单——不加则第一次 feed 刷新就把
+# 迁移保下来的备选配置/败值快照洗掉（work8/DESIGN §8 集成硬要求第 3 条）。
+_LOCAL_EXTRA_KEYS = ("orig_name", "quarantined", "quarantine_reason",
+                     "merged_superseded")
 # 消失标记三键（§8）：打上 = 源里暂时没了；来源里重新出现即清除。
 _GONE_KEYS = ("source_gone", "source_gone_at", "source_gone_from")
 
@@ -143,8 +150,10 @@ def _parse_raw(entry, raw):
     if entry["type"] in ("feed", "feed_mirror"):
         if isinstance(raw, bytes):
             raw = feed.decode_feed_bytes(raw)
-        # source 即归属：feed 落 feed 页、镜像落 OpenVPN 页（§7），同一
-        # 解析器、同一个 source 参数，落页口径在 make_node_id 里收口。
+        # source 即归属（=ENTRY_PAGE[type_]）：feed 落 VPNGate 合并页
+        # （task8/task23 落页后唯一 feed 类入口；镜像类型已废除，旧条目
+        # 由 sources/landing.py 启动迁移转正/删除）。同一解析器、同一个
+        # source 参数，落页口径在 make_node_id 里收口。
         nodes = feed.parse_feed_to_nodes(raw, source=entry["page"])
         return nodes, 0, "feed.parse_feed_to_nodes"
     fi = _load_format_import()
@@ -183,7 +192,9 @@ def merge_fresh(old, fresh, entry_id) -> Node:
     # 刷新不把名字打回来源原名（原名仍由 orig_name 保着）。
     if old.extra.get("orig_name"):
         fresh.name = old.name
-    # 本地 extra 白名单带回（§5 表）
+    # 本地 extra 白名单带回（§5 表）。merged_superseded 随白名单存活：
+    # task8 迁移快照（work8/DESIGN §3.9）经刷新后原样保留，快照里的
+    # 备选配置/败值历史不丢（work8/DESIGN §8 集成硬要求第 3 条）。
     for key in _LOCAL_EXTRA_KEYS:
         if key in old.extra:
             fresh.extra[key] = old.extra[key]
@@ -262,8 +273,10 @@ class SourceRegistry:
     # ---------------- 增删查 ----------------
     def register(self, type_: str, address: str = "", name: str = "",
                  enabled: bool = True, now: float = None) -> dict:
-        """登记一个可续期来源。feed/feed_mirror 地址可留空（自动填官方
-        默认）；subscription 必须给 http/https 地址。返回登记条目副本。"""
+        """登记一个可续期来源。feed 地址可留空（自动填官方默认）；
+        subscription 必须给 http/https 地址。返回登记条目副本。
+        （feed_mirror 类型已废除——task8/task23 落页，work8/DESIGN §5.1；
+        传它会在这里显式报错。）"""
         if type_ not in ENTRY_TYPES:
             raise ValueError(f"未知来源类型: {type_}（可选 {ENTRY_TYPES}）")
         address = (address or "").strip()
@@ -285,7 +298,7 @@ class SourceRegistry:
                     raise ValueError("feed 地址只允许 http/https")
             else:
                 address = FEED_DEFAULT_ADDRESS
-            entry_id = "feed" if type_ == "feed" else "feed-mirror"
+            entry_id = "feed"                # feed 类唯一条目 id（不变）
         entry = {
             "id": entry_id, "type": type_, "page": ENTRY_PAGE[type_],
             "address": address, "name": name, "enabled": bool(enabled),
@@ -333,13 +346,14 @@ class SourceRegistry:
     def owned_nodes(self, store, entry) -> list:
         """这个登记条目「管得到」的库内节点（消失判定只作用于这个范围）。
         含拉黑节点——banned 节点也是库内真实记录，源里没了照样标消失。
-        - feed：整页归属（feed 页只有这一个源，登记前的手导 feed 也是它产的）
+        - feed：只认登记戳（task23 落页：合并页混着手导 .ovpn——含第三方
+          服务器——没戳的绝不碰，work8/DESIGN §5.2。合并前 feed 是「整页
+          归属」、其页内节点全是 feed 解析器所产；启动迁移已给全部 feed 系
+          存量补戳 extra.registry_entry="feed"，归属集合与合并前等价，
+          「手导永不标消失」保护原样保留）
         - subscription：登记戳 或 subscription_url 溯源（收编登记制前的老节点）
-        - feed_mirror：只认登记戳（OpenVPN 页混着手导 .ovpn，没戳的绝不碰）
         """
         nodes = store.list_nodes(source=entry["page"], include_banned=True)
-        if entry["type"] == "feed":
-            return list(nodes)
         out = []
         for n in nodes:
             if n.extra.get("registry_entry") == entry["id"]:
@@ -400,9 +414,9 @@ def update_entry(registry: SourceRegistry, store, entry_id: str,
 
     # ③ 按身份合并：先算全量差异，再统一落库（§4.3）。
     # 归属范围（owned）决定**消失判定**；但**合并**要认全库同身份节点——
-    # 例如手导 .ovpn 与镜像节点同 host:port 同 id（§7），它不在镜像归属
-    # 范围里（没登记戳），却必须按 §5 合并保住验真状态，而不是被
-    # merge_fresh(None,…) 当新节点盖掉。
+    # 例如手导 .ovpn 与 feed 节点同端点同 id（task8/task23 落页后同一
+    # canonical 键），手导的没登记戳、不在归属范围里，却必须按 §5 合并
+    # 保住验真状态，而不是被 merge_fresh(None,…) 当新节点盖掉。
     old_by_id = {n.id: n for n in registry.owned_nodes(store, entry)}
     for n in nodes:
         if n.id not in old_by_id:

@@ -13,6 +13,8 @@
   python -m client.ui.cli --db client.db verify <node_id>
   python -m client.ui.cli --db client.db connect <node_id>
   python -m client.ui.cli --db client.db status / disconnect
+  python -m client.ui.cli --db client.db doctor
+  python -m client.ui.cli --db client.db export-diag [--out 路径]
 
 注：connect 的会话状态只在本进程内有效（M1 CLI 形态）；常驻守护/托盘在 M3。
 verify 默认走真实 probe（本机测量）；测试通过 main(probe_factory=...) 注入假 probe。
@@ -25,11 +27,19 @@ import argparse
 import os
 import sys
 
+from ..core import diag
+from ..core import diag_collect
 from ..core import history
+from ..core import settings_store, site_blocklist
 from ..core.health import (check_ports_free, describe_occupied,
                            proxy_conflict, read_system_proxy)
 from ..core.model import SCENES, SOURCES
+from ..core.usage_model import UsageSettings
 from ..core.orchestrator import Orchestrator, OrchestratorError
+from ..core.settings_proto import (Settings, SettingsCorruptError,
+                                   SettingsError, SettingsStore,
+                                   SettingsVersionError, derived_data_dir,
+                                   resolve_db_path, settings_file_path)
 from ..core.store import Store
 from ..core.verify import apply_outcome, make_real_probe, verify_exit
 from ..engines.openvpn_engine import OpenVPNEngine
@@ -41,11 +51,26 @@ from ..sources import manual as manual_src
 from ..sources import pipeline as pipeline_src
 from ..sources import source_registry as registry_src
 from ..sources import subscription as subscription_src
+from ..sources.landing import run_startup_migration
 from urllib.parse import urlsplit
 
 DEFAULT_DB = os.environ.get(
     "GATE_CLIENT_DB",
     os.path.join(os.path.expanduser("~"), ".local", "share", "gate-client", "client.db"))
+
+
+def _load_settings_readonly(args_db):
+    """CLI 读统一设置（task24 §8-3/§4.2）：settings.json 在 → 读（损坏/
+    版本/未知键异常上抛给 main 呈现，退出码 2）；不在 → 全默认、零提示
+    零动作。CLI 刻意不落盘不迁移：settings.json 的首次初始化与 QSettings
+    迁移只在 GUI 进行（§4.3），避免无 PySide6 的 CLI 抢先把文件建成纯
+    默认、丢掉 QSettings 偏好。"""
+    sfile = settings_file_path(explicit_db=args_db,
+                               env_db=os.environ.get("GATE_CLIENT_DB"))
+    st = SettingsStore(sfile)
+    if not st.exists():
+        return Settings()
+    return st.load()
 
 
 def _err(msg: str) -> int:
@@ -195,7 +220,7 @@ def cmd_sources(store: Store, args, fetcher=None) -> int:
 
 
 def cmd_list(store: Store, args) -> int:
-    """默认视图 = 按来源分组的四页（来源第一维度）；场景只是页内过滤。"""
+    """默认视图 = 按来源分组的三页（来源第一维度）；场景只是页内过滤。"""
     from ..core.history import sorted_nodes
     from ..core.model import SOURCE_LABELS, SOURCES
     nodes = store.list_nodes(scene=args.scene, include_banned=args.all)
@@ -261,14 +286,52 @@ def cmd_verify(store: Store, args, probe_factory) -> int:
     return 0
 
 
-def _build_orchestrator(store: Store, probe_factory, engine_factory=None) -> Orchestrator:
+def _build_orchestrator(store: Store, probe_factory, engine_factory=None,
+                        settings: Settings = None,
+                        settings_file=None) -> Orchestrator:
+    """engines=None 时构造默认引擎束。task24 §8-1 接线：
+    - SingBoxEngine 传设置端口（settings=None 时不传 → 引擎模块默认端口
+      兜底，§8-1）；usage_provider（task17）原样保留。
+    - out_dir 从派生基准目录（derived_data_dir：与库同目录——库路径已按
+      §8-3 优先级解析，无覆盖时即 settings.data_dir）的 ovpn_out 派生，
+      现行「同目录派生」口径不变。
+    - settings_file = main() 解析出的 settings.json 落点（§4.1：显式覆盖
+      目录，否则内置默认目录——不跟随 data_dir 设置）：给出时供给器按它
+      现读统一设置（与设置页/③区同一份文件）；不给时维持 task17 的
+      「与库同目录」推导（独立调用方兼容）。外部注入 engine_factory 时
+      不介入（测试/显式覆盖优先）。"""
     engines = {}
     if engine_factory is not None:
         engines = engine_factory()
     else:
-        out_dir = os.path.join(os.path.dirname(os.path.abspath(store.path or "client.db")),
+        out_dir = os.path.join(derived_data_dir(store.path, settings),
                                "ovpn_out")
-        singbox = SingBoxEngine()
+        # U2（task17）：使用设置供给器——每次连接现读（下次连接生效）；
+        # 设置/名单损坏如实抛 ValueError，经引擎包成 EngineError 显式失败，
+        # 不静默按默认值连。覆盖目录 = db 所在目录（task12 §8-3 优先级链）；
+        # settings_path/blocklist_path 把目录推导成文件路径（load_* 的
+        # path 参是文件路径，传目录会报 Is a directory，见审查注记）。
+        # task24 §4.1：settings.json 落点不跟随 data_dir 设置——main() 把
+        # 解析出的落点经 settings_file 传入，保证供给器读到与设置页/③区
+        # 同一份文件；未传（独立调用/测试）时沿用 task17 同目录推导。
+        def _usage_provider():
+            data_dir = os.path.dirname(os.path.abspath(store.path or "client.db"))
+            if settings_file is not None:
+                current = settings_store.load_settings(settings_file)
+            else:
+                current = settings_store.load_settings(
+                    settings_store.settings_path(data_dir))
+            usage = UsageSettings(**current.usage_dict())
+            blocklist = site_blocklist.load_blocklist(
+                site_blocklist.blocklist_path(data_dir))
+            return usage, blocklist
+
+        if settings is not None:
+            singbox = SingBoxEngine(usage_provider=_usage_provider,
+                                    socks_port=settings.socks_port,
+                                    http_port=settings.http_port)
+        else:
+            singbox = SingBoxEngine(usage_provider=_usage_provider)
         engines = {"openvpn": OpenVPNEngine(out_dir=out_dir)}
         for proto in SINGBOX_PROTOCOLS:
             engines[proto] = singbox
@@ -289,13 +352,16 @@ def _build_orchestrator(store: Store, probe_factory, engine_factory=None) -> Orc
     return Orchestrator(store, engines, verifier)
 
 
-def cmd_connect(store: Store, args, probe_factory, engine_factory=None) -> int:
+def cmd_connect(store: Store, args, probe_factory, engine_factory=None,
+                settings: Settings = None, settings_file=None) -> int:
     node = store.get_node(args.node_id)
     if node is not None and node.extra.get("quarantined") == "1":
         # 隔离节点被手动点名连接：警告但不阻断（用户点名即视为知情，M2.5 规格）
         print(f"⚠ 该节点已被标记为污染节点（{node.extra.get('quarantine_reason', '')}），"
               "仍按你的点名连接。")
-    orch = _build_orchestrator(store, probe_factory, engine_factory)
+    orch = _build_orchestrator(store, probe_factory, engine_factory,
+                               settings=settings,
+                               settings_file=settings_file)
     # 接管方式（task6）：CLI 每次连接显式给 --mode；默认 proxy（现行）。
     # tun 模式下引擎 start() 会先过提权前提检查——提权启动器未实现时
     # 显式报错（退出码 1，经 orchestrator 的 error 事件），不静默回退。
@@ -315,9 +381,11 @@ def cmd_connect(store: Store, args, probe_factory, engine_factory=None) -> int:
                     "关掉占用它的程序（其他代理软件？）或改它的端口，再重试。")
             our_port = engine.http_port
         else:
-            # OpenVPN 是 TUN 模式、不占 7897/7898：只查②，参照端口仍用
-            # 本客户端引擎端口。
-            our_port = DEFAULT_HTTP_PORT
+            # OpenVPN 是 TUN 模式、不占引擎端口：只查②，参照端口改用
+            # 设置值（task24 §8-1 端口检查兜底点改读设置；无 settings →
+            # 模块默认端口兜底）。
+            our_port = (settings.http_port if settings is not None
+                        else DEFAULT_HTTP_PORT)
         conflict = proxy_conflict(read_system_proxy(), our_port)
         if conflict["conflict"]:
             print(f"[警告] {conflict['reason']}客户端不会改你的系统代理，"
@@ -350,12 +418,30 @@ def cmd_restore_names(store: Store, args) -> int:
     return 0
 
 
-def cmd_status(store: Store, args) -> int:
+def _collect_check_env(store: Store, settings: Settings = None) -> dict:
+    """doctor / cmd_status 共享的体检 env 组装（work7/DESIGN §5.2「抽
+    _collect_check_env(store)」）。组装本体在 core/diag_collect（task22
+    落地的收集器）：探测全部复用 core/health 现成函数与引擎端口常量，
+    无第二套阈值；这里只做 CLI 侧的粘合。
+    task24 §8-1：体检参照端口改读设置值——给出 settings 时用设置端口
+    构造只读引擎替身（构造器只设属性），收集器的占用/系统代理探测按
+    设置端口判定；无 settings → 收集器内部按模块默认端口兜底。"""
+    engines = None
+    if settings is not None:
+        engines = {"settings-ports": SingBoxEngine(
+            socks_port=settings.socks_port,
+            http_port=settings.http_port)}
+    return diag_collect.collect_check_env(store, engines=engines)
+
+
+def cmd_status(store: Store, args, settings: Settings = None) -> int:
     total = store.count_nodes()
     print(f"节点库: {total} 个节点（db={store.path}）")
-    # 一次性体检（task5）：引擎端口占用 + 系统代理指向判读。
-    occupied = {item["port"]: item for item in
-                check_ports_free((DEFAULT_HTTP_PORT, DEFAULT_SOCKS_PORT))}
+    # 一次性体检（task5）：引擎端口占用 + 系统代理指向判读。探测 env 与
+    # doctor 共享（_collect_check_env → core/diag_collect → core/health）；
+    # 参照端口改用设置值（task24 §8-1 端口检查兜底点改读设置）。
+    env = _collect_check_env(store, settings=settings)
+    occupied = {item["port"]: item for item in env["ports_occupied"]}
     for port, label in ((DEFAULT_HTTP_PORT, "HTTP 入站"),
                         (DEFAULT_SOCKS_PORT, "SOCKS 入站")):
         item = occupied.get(port)
@@ -363,11 +449,7 @@ def cmd_status(store: Store, args) -> int:
             print(f"端口 {port}（{label}）：空闲")
         else:
             print(f"端口 {port}（{label}）：{describe_occupied([item])}")
-    sysproxy = read_system_proxy()
-    if not sysproxy.get("available"):
-        print(f"系统代理：读不到（{sysproxy.get('error') or '未知原因'}）")
-    else:
-        print(f"系统代理：{proxy_conflict(sysproxy, DEFAULT_HTTP_PORT)['reason']}")
+    print(f"系统代理：{env['proxy_conflict']['reason']}")
     print("会话: CLI 为单次命令形态，常驻会话状态在 M3 托盘提供；"
           "connect 命令在本进程内完成 引擎启动+验出口 全流程校验。")
     print("接管方式: 默认系统代理（proxy）；TUN 模式（connect --mode tun）"
@@ -376,10 +458,41 @@ def cmd_status(store: Store, args) -> int:
     return 0
 
 
+def cmd_doctor(store: Store, args, settings: Settings = None) -> int:
+    """一键自检（work7/DESIGN §4）：env 由 _collect_check_env 组装（探测
+    全部复用 core/health 现成函数），判读全在 diag.run_checks 纯函数。
+    退出码口径（work7/DONE.md §4-7）：全绿 0、有 fail 1；env 缺键是
+    「判不了」≠ fail。诊断只呈现结果，不触发任何连接动作（铁律）。
+    task24 §8-1：体检参照端口随设置值（cmd_status 同款）。"""
+    results = diag.run_checks(_collect_check_env(store, settings=settings))
+    print(diag.render_checks(results))
+    return 0 if all(r.ok for r in results) else 1
+
+
+def cmd_export_diag(store: Store, args) -> int:
+    """导出脱敏诊断包（work7/DESIGN §2；材料收集在 core/diag_collect）。
+    输出红线（work7/DONE.md §4-6）：只报包路径与文件数，不回显任何节点
+    信息——与 cmd_import_subscription 不回显订阅地址同口径。退出码恒 0，
+    失败走 [错误] 行 = 2。"""
+    out_path = os.path.expanduser(args.out or "") \
+        or diag_collect.default_bundle_path()
+    try:
+        out_path, written = diag_collect.build_diag_bundle(store, out_path)
+    except Exception as exc:   # noqa: BLE001 - 导出失败给人话，不让包半途落地
+        return _err(f"导出诊断包失败: {exc}")
+    print(f"诊断包已导出：{out_path}（{len(written)} 个文件）")
+    return 0
+
+
 # ---------------------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="gate-client", description="自研代理客户端（M1 核心 CLI）")
-    ap.add_argument("--db", default=DEFAULT_DB, help=f"本地数据库路径（默认 {DEFAULT_DB}）")
+    # --db 不给默认值：留 None 让 main() 按 §8-3 四档优先级解析
+    #（--db 显式 > GATE_CLIENT_DB > settings.data_dir > 内置默认）；
+    # DEFAULT_DB 常量保留作内置默认的展示口径。
+    ap.add_argument("--db", default=None,
+                    help="本地数据库路径（默认按 统一设置 > GATE_CLIENT_DB "
+                         f"环境变量 > 内置默认 {DEFAULT_DB} 解析）")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("intake", help="收纳节点：来源文件/链接 → 本地库")
@@ -395,7 +508,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--url", help="订阅地址（http/https）")
     p.add_argument("--name", help="订阅名（可选，写进节点 extra 做溯源）")
 
-    p = sub.add_parser("list", help="列出节点（默认按来源分四页输出）")
+    p = sub.add_parser("list", help="列出节点（默认按来源分三页输出）")
     p.add_argument("--source", choices=list(SOURCES), help="只看某一页")
     p.add_argument("--scene", choices=list(SCENES), help="页内按场景过滤")
     p.add_argument("--all", action="store_true", help="包含已拉黑节点")
@@ -420,12 +533,18 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("disconnect", help="断开（CLI 形态下无常驻会话，仅提示）")
     sub.add_parser("restore-names", help="把按实测出口改名的节点恢复原名")
     sub.add_parser("status", help="查看节点库与会话说明")
+    sub.add_parser("doctor",
+                   help="一键自检：9 项检查逐项判读（只读，不连不测不联网）")
+    p = sub.add_parser("export-diag",
+                       help="导出脱敏诊断包（zip），输出只报包路径与文件数")
+    p.add_argument("--out",
+                   help="包输出路径（默认 ~/gate-client-diag-<UTC时间戳>.zip）")
 
     p = sub.add_parser("sources", help="来源登记：登记可续期的订阅/feed，一键更新")
     sp = p.add_subparsers(dest="sources_cmd", required=True)
     sp.add_parser("list", help="列出已登记来源（地址只显示域名，不回显全址）")
     p_add = sp.add_parser("add", help="登记一个来源")
-    p_add.add_argument("--type", choices=["subscription", "feed", "feed_mirror"],
+    p_add.add_argument("--type", choices=["subscription", "feed"],   # feed_mirror 已废除（task23 落页）
                        required=True)
     p_add.add_argument("--address", help="订阅/feed 地址（feed 可留空用官方默认）")
     p_add.add_argument("--name", help="来源名（可选）")
@@ -446,8 +565,27 @@ def main(argv=None, probe_factory=None, engine_factory=None, fetcher=None) -> in
     if probe_factory is None:
         proxy = getattr(args, "proxy", None)
         probe_factory = lambda: make_real_probe(proxy=proxy)  # noqa: E731
-    store = Store(args.db)
+    # —— 统一设置（task24 §8-3 路径优先级 + §4.2 CLI 报错退出码 2）——
+    env_db = os.environ.get("GATE_CLIENT_DB")
+    sfile = settings_file_path(explicit_db=args.db, env_db=env_db)
     try:
+        settings = _load_settings_readonly(args.db)
+    except (SettingsCorruptError, SettingsVersionError, SettingsError) as exc:
+        return _err(f"设置文件读取失败：{sfile}\n{exc}\n"
+                    "（修正或删除该文件后重试；删除即回到默认设置）")
+    # 库路径四档优先级（§8-3）：--db 显式 > GATE_CLIENT_DB > settings.data_dir
+    # > 内置默认。out_dir / sources.json 等派生落点随 store.path 同目录派生
+    # （§8-1，口径不变），settings.data_dir 档由此自动生效。
+    store = Store(resolve_db_path(explicit_db=args.db, env_db=env_db,
+                                  settings=settings))
+    try:
+        # task23 落页：启动检测四页时代存量（sources.json 含 feed_mirror 残留
+        # ∨ 库内旧两键节点）→ 一次性迁移，幂等、误触发无害、不联网
+        # （work8/DESIGN §8-6；实现在 sources/landing.py，只调 merge_proto）。
+        migration = run_startup_migration(store)
+        if migration["triggered"]:
+            print("已迁移旧版来源数据：openvpn / vpngate_feed 两页并入 "
+                  "vpngate，登记表 feed_mirror 条目已并入 feed。")
         if args.cmd == "intake":
             return cmd_intake(store, args)
         if args.cmd == "import-subscription":
@@ -459,7 +597,8 @@ def main(argv=None, probe_factory=None, engine_factory=None, fetcher=None) -> in
         if args.cmd == "verify":
             return cmd_verify(store, args, probe_factory)
         if args.cmd == "connect":
-            return cmd_connect(store, args, probe_factory, engine_factory)
+            return cmd_connect(store, args, probe_factory, engine_factory,
+                               settings=settings, settings_file=sfile)
         if args.cmd == "disconnect":
             print("CLI 形态下没有常驻会话可断开（连接在 connect 进程内管理）；"
                   "常驻断开在 M3 托盘提供。")
@@ -467,7 +606,11 @@ def main(argv=None, probe_factory=None, engine_factory=None, fetcher=None) -> in
         if args.cmd == "restore-names":
             return cmd_restore_names(store, args)
         if args.cmd == "status":
-            return cmd_status(store, args)
+            return cmd_status(store, args, settings=settings)
+        if args.cmd == "doctor":
+            return cmd_doctor(store, args, settings=settings)
+        if args.cmd == "export-diag":
+            return cmd_export_diag(store, args)
         if args.cmd == "sources":
             return cmd_sources(store, args, fetcher=fetcher)
         return _err(f"未知命令: {args.cmd}")

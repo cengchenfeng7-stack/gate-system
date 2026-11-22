@@ -91,7 +91,7 @@ class TestCli(unittest.TestCase):
         run_cli(["--db", self.db, "intake", "--feed",
                  self._write_feed()])
         rc, out, err = run_cli(
-            ["--db", self.db, "connect", "vpngate_feed:openvpn:vpn123456.opengw.net:443"],
+            ["--db", self.db, "connect", "vpngate:openvpn:vpn123456.opengw.net:443"],
             probe_factory=fake_probe_factory,
             engine_factory=lambda: {"openvpn": FakeEngine()})
         self.assertEqual(rc, 0, err)

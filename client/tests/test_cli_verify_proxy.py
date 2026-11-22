@@ -104,7 +104,7 @@ class TestVerifyThroughProxy(unittest.TestCase):
         with mock.patch.object(cli, "make_real_probe", self.rec.fake_make_real_probe):
             rc, out, err = run_cli(
                 ["--db", self.db, "connect",
-                 "vpngate_feed:openvpn:vpn123456.opengw.net:443"],
+                 "vpngate:openvpn:vpn123456.opengw.net:443"],
                 probe_factory=self.rec.factory,
                 engine_factory=lambda: {"openvpn": FakeEngine()})
         self.assertEqual(rc, 0, err)

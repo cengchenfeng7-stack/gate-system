@@ -4,8 +4,8 @@
 VPN Gate feed 来源（sources/feed.py）
 =======================================
 把官方 feed（CSV 或镜像 JSON）翻译成 Node 列表（OpenVPN 协议），
-归属「VPN Gate feed 页」（source=vpngate_feed）——底层虽是 OpenVPN，
-按来源第一维度独立成页，不与 OpenVPN 页合并（用户定，2026-11-19）。
+归属「VPNGate 来源页」（source=vpngate，task8/task23 落页：旧 feed 页与
+OpenVPN 页本是同一份 feed，合并为一页，work8/DESIGN §1）。
 
 复用说明（按设计“不重造轮子”，以下函数为复制并注明出处，
 因客户端要求纯标准库、且不能依赖流水线目录而 vendored）：
@@ -196,7 +196,7 @@ def ovpn_proto_port(cfg_text: str):
 # ---------------------------------------------------------------------------
 # feed 行 → Node
 # ---------------------------------------------------------------------------
-def rows_to_nodes(rows: list, source: str = "vpngate_feed") -> list:
+def rows_to_nodes(rows: list, source: str = "vpngate") -> list:
     configs = rows_to_feed_configs(rows)
     nodes = []
     for host, row in configs.items():
@@ -231,11 +231,11 @@ def rows_to_nodes(rows: list, source: str = "vpngate_feed") -> list:
     return nodes
 
 
-def parse_feed_to_nodes(text: str, source: str = "vpngate_feed") -> list:
+def parse_feed_to_nodes(text: str, source: str = "vpngate") -> list:
     return rows_to_nodes(parse_feed_text(text), source=source)
 
 
-def load_feed_file(path: str, source: str = "vpngate_feed") -> list:
+def load_feed_file(path: str, source: str = "vpngate") -> list:
     with open(path, "rb") as f:
         text = decode_feed_bytes(f.read())
     return parse_feed_to_nodes(text, source=source)

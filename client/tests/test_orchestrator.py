@@ -49,9 +49,11 @@ def bad_verifier(node):
 
 def make_orch(verifier=ok_verifier, engine=None):
     store = Store(":memory:")
-    store.upsert_node(Node(id="n1", name="n1", protocol="openvpn", source="vpngate_feed",
+    # 自 task23 起行为反转、依据 work8/DESIGN §7：旧键 vpngate_feed 退役，
+    # fixture 改用 canonical 键 vpngate（编排器按 protocol 选引擎，不读 source）。
+    store.upsert_node(Node(id="n1", name="n1", protocol="openvpn", source="vpngate",
                            host="h1", port=443))
-    store.upsert_node(Node(id="n2", name="n2", protocol="openvpn", source="vpngate_feed",
+    store.upsert_node(Node(id="n2", name="n2", protocol="openvpn", source="vpngate",
                            host="h2", port=443))
     eng = engine or FakeEngine()
     return Orchestrator(store, {"openvpn": eng}, verifier), eng, store

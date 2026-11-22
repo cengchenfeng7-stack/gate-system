@@ -6,8 +6,9 @@
 - 分享链接：vless:// / ss:// / trojan:// / sstp://（基本字段 + 查询参数进 extra）
   → 归属「手动导入页」（source=manual）
 - .ovpn 文本：提取 remote 主机/端口，配置原文存 config_ref
-  → 归属「OpenVPN 节点页」（source=openvpn）：.ovpn 进的是 OpenVPN 引擎
-  节点池，按用户定的四页结构（来源第一维度）不进手动页。
+  → 归属「VPNGate 来源页」（source=vpngate，task8/task23 落页：.ovpn 进
+  的是 OpenVPN 引擎节点池，落在合并页、不进手动页；没登记戳的手导节点
+  绝不被 feed 更新触碰——work8/DESIGN §5.2）。
 只解析不联网。订阅批量导入（base64 订阅等）在 M2 的 subscription.py。
 """
 
@@ -92,7 +93,7 @@ def parse_links_text(text: str, source: str = "manual") -> list:
     return nodes
 
 
-def parse_ovpn_text(text: str, name: str = "", source: str = "openvpn") -> Node:
+def parse_ovpn_text(text: str, name: str = "", source: str = "vpngate") -> Node:
     m = _REMOTE_RE.search(text)
     if not m:
         raise ValueError("OpenVPN 配置里找不到 remote 行，不是可用的 .ovpn")
@@ -110,7 +111,7 @@ def parse_ovpn_text(text: str, name: str = "", source: str = "openvpn") -> Node:
     )
 
 
-def load_ovpn_file(path: str, source: str = "openvpn") -> Node:
+def load_ovpn_file(path: str, source: str = "vpngate") -> Node:
     with open(path, "r", encoding="utf-8", errors="replace") as f:
         text = f.read()
     import os
