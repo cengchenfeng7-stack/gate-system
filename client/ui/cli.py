@@ -15,10 +15,16 @@
   python -m client.ui.cli --db client.db status / disconnect
   python -m client.ui.cli --db client.db doctor
   python -m client.ui.cli --db client.db export-diag [--out 路径]
+  python -m client.ui.cli --db client.db lists recheck [--dry-run]
 
 注：connect 的会话状态只在本进程内有效（M1 CLI 形态）；常驻守护/托盘在 M3。
 verify 默认走真实 probe（本机测量）；测试通过 main(probe_factory=...) 注入假 probe。
 import-subscription 的输出只报汇总数字与格式，不回显订阅地址、不打印节点链接原文。
+sources collect 的输出只报数字（种子/候选/验真/入库/门槛/截断/开关），
+不回显任何节点地址、种子或候选地址原文、出口 IP；手动命令永远可用
+（不受自动开关控制）。自动定时开关在统一设置（auto_collect_enabled，
+默认关——铁律：不经主人点头，客户端不许自己联网拉新节点），GUI 定时器
+按它到点跑同一个 _sources_collect；CLI 本体无定时器。
 """
 
 from __future__ import annotations
@@ -26,11 +32,13 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import time
 
 from ..core import diag
 from ..core import diag_collect
 from ..core import failover
 from ..core import history
+from ..core import list_recheck
 from ..core import ruleset_cache
 from ..core import settings_store, site_blocklist
 from ..core.health import (check_ports_free, describe_occupied,
@@ -43,14 +51,18 @@ from ..core.settings_proto import (Settings, SettingsCorruptError,
                                    SettingsVersionError, derived_data_dir,
                                    resolve_db_path, settings_file_path)
 from ..core.store import Store
-from ..core.verify import apply_outcome, make_real_probe, verify_exit
+from ..core.verify import (VerifyOutcome, apply_outcome, make_real_probe,
+                           pollution_of, verify_exit)
+from ..engines.base import EngineError
 from ..engines.openvpn_engine import OpenVPNEngine
 from ..engines.singbox_engine import (DEFAULT_HTTP_PORT, DEFAULT_SOCKS_PORT,
                                       SINGBOX_PROTOCOLS, SingBoxEngine)
+from ..sources import collector as collector_src
 from ..sources import feed as feed_src
 from ..sources import format_import as format_src
 from ..sources import manual as manual_src
 from ..sources import pipeline as pipeline_src
+from ..sources import seed_config as seed_src
 from ..sources import source_registry as registry_src
 from ..sources import subscription as subscription_src
 from ..sources.landing import run_startup_migration
@@ -59,6 +71,13 @@ from urllib.parse import urlsplit
 DEFAULT_DB = os.environ.get(
     "GATE_CLIENT_DB",
     os.path.join(os.path.expanduser("~"), ".local", "share", "gate-client", "client.db"))
+
+# CLI 复查临时引擎端口（task28）：与 GUI 手动测速 _TEMP_SOCKS_PORT/
+# _TEMP_HTTP_PORT 同值同源（ui/settings_dialog.py RESERVED_PORTS 保留段）。
+# CLI 是单次进程形态，与后台窗临时引擎撞口的窗口极小；真撞上即引擎启动
+# 失败 → 该节点如实记「复查失败」，重跑即可（不静默换端口）。
+RECHECK_SOCKS_PORT = 10818
+RECHECK_HTTP_PORT = 10819
 
 
 def _load_settings_readonly(args_db):
@@ -156,19 +175,38 @@ def cmd_import_subscription(store: Store, args, fetcher=None) -> int:
 
 
 def _registry_path(store: Store) -> str:
-    """登记表位置：与节点库同目录的 sources.json（GUI/CLI 共用同一份）。"""
+    """登记表 JSON 落点：与节点库同目录的 sources.json（GUI/CLI 共用）。
+
+    task30 起登记表事实源是 Store 的 sources 表（_registry 走 store 形态），
+    本路径只在「表空且该文件存在」的一次性迁移（cmd_sources →
+    migrate_registry_json_to_store）被读一次；此后 JSON 文件留存备查，
+    不再被读写，也不再是事实源（写入只走表）。GUI（app.py）本段不动，
+    暂仍走文件形态。"""
     return os.path.join(
         os.path.dirname(os.path.abspath(store.path or "client.db")),
         "sources.json")
 
 
 def _registry(store: Store):
-    return registry_src.SourceRegistry(_registry_path(store))
+    """store-backed 登记表（task30）：读写走 Store 的 sources 表，与 nodes
+    共用同一连接与 RLock；不再读 sources.json——存量 JSON 由 cmd_sources
+    首次使用表形态时一次性只读搬进表（migrate_registry_json_to_store）。"""
+    return registry_src.SourceRegistry(store=store)
 
 
-def cmd_sources(store: Store, args, fetcher=None) -> int:
-    """来源登记命令：list/add/update/update-all/remove/enable/disable。
-    fetcher 为测试注入点（默认真联网拉取）。"""
+def cmd_sources(store: Store, args, fetcher=None, engine_factory=None,
+                settings_file=None) -> int:
+    """来源登记命令：list/add/update/update-all/remove/enable/disable/collect。
+    fetcher 为测试注入点（默认真联网拉取）；engine_factory 为 collect 验真
+    临时引擎的测试注入点（测试注假引擎 + 假探针，零联网）。
+    settings_file = main() 解析出的 settings.json 落点（collect 门槛数字
+    现读它，与 cmd_connect 的 settings_file 同款落点口径；未给时按
+    「与库同目录」推导兜底，task17 _usage_provider 先例）。
+    task30：首次使用表形态时（表空且 sources.json 存在）把存量 JSON 只读
+    搬进 sources 表，幂等；JSON 文件保留不动作回退，此后写入只走表。"""
+    if not store.entries() and os.path.exists(_registry_path(store)):
+        registry_src.migrate_registry_json_to_store(
+            _registry_path(store), store)
     reg = _registry(store)
     if args.sources_cmd == "list":
         entries = reg.entries()
@@ -218,7 +256,477 @@ def cmd_sources(store: Store, args, fetcher=None) -> int:
         print(f"已{'启用' if args.sources_cmd == 'enable' else '停用'} "
               f"{args.entry_id}")
         return 0
+    if args.sources_cmd == "collect":
+        return _sources_collect(store, fetcher=fetcher,
+                                engine_factory=engine_factory,
+                                settings_file=settings_file)
     return _err(f"未知 sources 子命令: {args.sources_cmd}")
+
+
+# ---------------------------------------------------------------------------
+# sources collect：手动搜集接线（task27；work9 DESIGN §7.2 步骤 3–4 落地）
+# ---------------------------------------------------------------------------
+# task31 收口 work9 §7.3 的三个未定项（定稿数字与依据见 work31 DESIGN §2）：
+# 转登记门槛（_collect_gate_ok 的连续通过计数）、候选池验真的批量节奏与
+# 上限（_collect_enter_store 的截断 + 可注假时钟的候选间隔）、自动搜集
+# 开关与定时器（开关默认关；GUI 定时器按 collect_interval_min 跑本文件
+# 的 _sources_collect，CLI 本体仍只有手动一条命令、永远可用）。
+# 门槛数字每轮现读统一设置（不持第二份可编辑副本）；「永不自动切换
+# 节点」不因定时化松动——搜集只往库里加候选，不碰引擎、不碰连接。
+
+COLLECT_TEMP_SOCKS_PORT = 10838   # 验真临时引擎独立端口（与 GUI 临时组
+COLLECT_TEMP_HTTP_PORT = 10839    # 10818/10819、自动组 10828/10829 错开）
+
+
+def _collect_parse(text: str) -> list:
+    """候选正文 → 节点条目（work9 DESIGN §7.2 步骤 2 的既定配方）：既有
+    format_import 四格式识别（b64 订阅 / 明文链接 / txt / Clash YAML）。
+    种子页的候选地址抽取是 collector.extract_candidates（run_collection
+    内建，本段零改动）。source=manual：搜集节点归手动导入页（与订阅导入
+    的 D1 落页同口径）。解析认不出 → ValueError，由 run_collection 吞进
+    dead_candidates（stage=parse），整轮不断。"""
+    return format_src.import_any_text(text, source="manual").nodes
+
+
+def _make_collect_temp_engine() -> SingBoxEngine:
+    """验真临时引擎（真实模式默认）：独立端口起一个 sing-box，测完即停，
+    不碰当前会话（口径同 GUI _test_node 的临时引擎纪律）。"""
+    return SingBoxEngine(socks_port=COLLECT_TEMP_SOCKS_PORT,
+                         http_port=COLLECT_TEMP_HTTP_PORT)
+
+
+def _verify_candidate(node, engine_factory=None) -> VerifyOutcome:
+    """单候选验真：既有验真流水线（verify_exit + make_real_probe），口径
+    同 cmd_connect 的 verifier 分流——sing-box 系候选起临时引擎，探针经
+    引擎实例自己的 http_proxy_url 造（流量经它出网，才测到候选的真实
+    出口）；engine_factory 为测试注入点（假引擎 + 假探针，零联网）。引擎
+    起不来（如缺 sing-box 二进制）→ 如实判失败，绝不降级直连探针——
+    直连测到的是本机出口，拿来冒充候选出口就是假验真（work9 §0 红线 1）。
+    OpenVPN 是 TUN/隧道模式，未连接时测不了（GUI _test_node 同款口径）→
+    如实判失败；其余无引擎协议同样没有可验路径。"""
+    if node.protocol in SINGBOX_PROTOCOLS:
+        engine = (engine_factory or _make_collect_temp_engine)()
+        try:
+            handle = engine.start(node)
+        except EngineError as exc:
+            return VerifyOutcome(ok=False, reason=f"临时引擎启动失败: {exc}")
+        try:
+            return verify_exit(node,
+                               make_real_probe(proxy=engine.http_proxy_url))
+        finally:
+            engine.stop(handle)
+    if node.protocol == "openvpn":
+        return VerifyOutcome(
+            ok=False, reason="OpenVPN 是隧道模式，未连接时测不了（先连接再验）")
+    return VerifyOutcome(ok=False,
+                         reason=f"{node.protocol} 协议暂无本机引擎可验")
+
+
+def _collect_gate_values(settings: Settings = None) -> dict:
+    """门槛数字解析（task31 唯一入口）：settings 给定 → 读统一设置五
+    字段（只读快照，不持第二份可编辑副本——调用方 _sources_collect 每轮
+    经 settings_store.load_settings 现读传入）；None → Settings() 默认值
+    兜底（「默认口径」= 开关关 + task27「过即进」门槛 + 本段定稿的节奏
+    默认）。单一事实源 = settings_proto 默认值，本层不另立常数。"""
+    s = settings if settings is not None else Settings()
+    return {"enabled": bool(s.auto_collect_enabled),
+            "interval_min": int(s.collect_interval_min),
+            "per_round": int(s.collect_verify_per_round),
+            "delay_ms": int(s.collect_verify_delay_ms),
+            "promote_min": int(s.collect_promote_min_ok)}
+
+
+def _collect_base_ok(outcome: VerifyOutcome) -> bool:
+    """入库基础口径（task27 `_collect_gate_ok` 函数体逐字平移）：验真
+    通过且出口未污染（pollution_of）——work9 DESIGN §0 红线 1 / §7.2
+    步骤 4，与订阅更新 update_entry 的 merge_fresh「能过就进」同口径。
+    纯函数：不记账、不碰库。"""
+    if not outcome.ok or outcome.exit_profile is None:
+        return False
+    polluted, _reason = pollution_of(outcome.exit_profile)
+    return not polluted
+
+
+def _ledger_candidate(ledger: dict, seed_id: str, node_id: str,
+                      now: float) -> dict:
+    """账本候选档案（task31 新挂点，不另建文件）：挂在 collect_ledger.
+    json 种子记录的 "collect_candidates" 子键下，按身份键 node.id（内容
+    指纹，跨轮稳定）建档。种子记录本体 13 字段 schema 冻结（work25）——
+    本函数只新增子键、既有键零触碰；collector.record_result 只改既定
+    字段并整档案 dict(rec) 浅拷贝带回（子键原样存活）、save_ledger 整
+    档案 json 落盘、load_ledger 只校验包裹层形状——对子键透明，
+    collector.py 零改动（test_collect_thresholds 机械锁定）。种子记录
+    缺失时经 collector 的 R0 建档补齐（同包私有复用，先例 =
+    _merge_collected 复用 _GONE_KEYS；正常轮里该种子必有档案，这是
+    防御分支）。"""
+    rec = collector_src._seed_record(ledger, seed_id, now)
+    cands = rec.setdefault("collect_candidates", {})
+    prof = cands.get(node_id)
+    if prof is None:
+        prof = {"streak": 0, "last_status": "", "last_round": "",
+                "updated_at": now}
+        cands[node_id] = prof
+    return prof
+
+
+def _collect_gate_ok(outcome: VerifyOutcome, ledger: dict = None,
+                     item=None, promote_min: int = 1,
+                     now: float = None) -> bool:
+    """入库门槛（task27 具名空槽；task31 在此收口「转登记门槛数字」）。
+
+    - 只给 outcome（既有调用形态）= 纯基础口径（_collect_base_ok），
+      零行为变化，task27 测试零改动；
+    - 给 ledger + item（池内条目）：先按基础口径判定，再把本次结果记进
+      账本候选档案（collect_ledger.json 种子记录的 collect_candidates
+      子键，不另建文件）：基础口径过 → streak +1（last_status="passed"），
+      连续次数达 promote_min 才放行；不过 → streak 清零（失败清零，
+      last_status="failed"）。未达标只记账不入库（调用方记
+      report["collect_held"]，不进死账）。
+    - 连续口径：池去重后每候选每轮至多验一次，streak 逐轮累积；失败
+      清零；缺席/截断不打断（缺席不是失败证据）。
+    - now：记账时间戳注入点（离线测试注假时钟）；None → time.time()。"""
+    base_ok = _collect_base_ok(outcome)
+    if ledger is None or item is None:
+        return base_ok
+    ts = time.time() if now is None else float(now)
+    sid = str(item.extra.get("collect_seed_id") or "")
+    if not sid:
+        return base_ok          # 无溯源键的池条目（正常轮不会出现）：退基础口径
+    prof = _ledger_candidate(ledger, sid, item.id, ts)
+    prof["updated_at"] = ts
+    prof["last_round"] = str(item.extra.get("collect_round") or "")
+    if base_ok:
+        prof["streak"] = int(prof.get("streak", 0)) + 1
+        prof["last_status"] = "passed"
+        return prof["streak"] >= promote_min
+    prof["streak"] = 0
+    prof["last_status"] = "failed"
+    return False
+
+
+def _merge_collected(old, fresh):
+    """同身份已在库时的本地状态保回（source_registry.merge_fresh §5 口径
+    的搜集版，不打 registry_entry——搜集节点不属于任何登记条目，溯源由
+    extra 的 collect_* 四键管）。搜集验真是刚测的新鲜证据：出口画像/
+    延迟抖动/场景名以新验真为准（apply_outcome 已写回），场景与旧档并集；
+    pinned/banned 由 store.upsert_node 自保；orig_name 保最早一次（「只存
+    第一次」）；merged_superseded 快照带回；消失标记清除（验真活着 =
+    回归，口径同 merge_fresh）。quarantined 不从旧档带回：新验真的污染
+    判定已由 apply_outcome 重算，带回旧标记会盖住新鲜证据。"""
+    if old is None:
+        return fresh
+    if old.extra.get("orig_name"):
+        fresh.extra["orig_name"] = old.extra["orig_name"]
+    if old.extra.get("merged_superseded") is not None:
+        fresh.extra["merged_superseded"] = old.extra["merged_superseded"]
+    for key in registry_src._GONE_KEYS:      # 同包私有常量复用，不抄第二份
+        fresh.extra.pop(key, None)
+    if fresh.metrics.latency_ms is None:
+        fresh.metrics.latency_ms = old.metrics.latency_ms
+    if fresh.metrics.jitter_ms is None:
+        fresh.metrics.jitter_ms = old.metrics.jitter_ms
+    fresh.scenes = set(old.scenes) | set(fresh.scenes)
+    return fresh
+
+
+def _collect_enter_store(store: Store, report: dict,
+                         engine_factory=None, settings: Settings = None,
+                         ledger: dict = None, sleeper=None,
+                         now: float = None) -> tuple:
+    """候选池 → 验真 → 入库（work9 DESIGN §7.2 步骤 4 的接线；task27 落
+    骨架，task31 收口「每轮验真上限 / 候选间隔」两个具名空槽）。
+
+    数字来源（不持第二份可编辑副本）：settings 给定 → 读统一设置落盘
+    五字段（调用方 _sources_collect 每轮现读传入）；None → Settings()
+    默认值（「默认口径」，单一事实源 = settings_proto 默认值）。
+    - 每轮上限 collect_verify_per_round：池大只验前 N 个（池序 =
+      run_collection 产出序），余下只记账（候选档案 last_status=
+      "overflow" =「本轮未验」）留待下轮自然重验、不进死账（截断不是
+      失败证据）；截断数记 report["collect_truncated"]。
+    - 候选间隔 collect_verify_delay_ms：候选之间（首前末后不睡）经
+      sleeper 注入点等待——sleeper=None 落 time.sleep，离线测试注假
+      时钟验证；delay_ms=0 不睡。sleep 只发生在本注入点上，循环里
+      不埋不可测的 wall sleep。
+    - 门槛：_collect_gate_ok（连续通过计数进账本候选档案，未达
+      collect_promote_min_ok 只记账不入库，记 report["collect_held"]，
+      不进死账）。
+    返回 (验真通过, 验真未过, 入库) 三个数（task27 既有形状，既有测试
+    零改动；暂存数 / 截断数经 report 带走）。"""
+    gate = _collect_gate_values(settings)
+    ts = time.time() if now is None else float(now)
+    pool = list(report.get("pool") or [])
+    verify_pool = pool[:gate["per_round"]]
+    overflow = pool[gate["per_round"]:]
+    report["collect_truncated"] = len(overflow)
+    for item in overflow:                      # 本轮未验：只记账，不记死
+        if ledger is not None:
+            sid = str(item.extra.get("collect_seed_id") or "")
+            if sid:
+                prof = _ledger_candidate(ledger, sid, item.id, ts)
+                prof["last_status"] = "overflow"
+                prof["last_round"] = str(report.get("round_id") or "")
+                prof["updated_at"] = ts
+    sleeper = sleeper or time.sleep
+    passed = failed = entered = held = 0
+    for idx, item in enumerate(verify_pool):
+        if idx and gate["delay_ms"] > 0:       # 候选之间隔开（首前末后不睡）
+            sleeper(gate["delay_ms"] / 1000.0)
+        try:
+            outcome = _verify_candidate(item, engine_factory=engine_factory)
+        except Exception as exc:   # noqa: BLE001 - 单候选失败吞进记账，整轮不断
+            outcome = VerifyOutcome(ok=False,
+                                    reason=f"{type(exc).__name__}: {exc}")
+        if _collect_gate_ok(outcome, ledger=ledger, item=item,
+                            promote_min=gate["promote_min"], now=ts):
+            passed += 1
+            fresh = apply_outcome(item, outcome)
+            store.upsert_node(
+                _merge_collected(store.get_node(fresh.id), fresh))
+            entered += 1
+        elif _collect_base_ok(outcome):
+            # 验真通过但连续次数未达门槛：只记账不入库，不是死账。
+            # passed = 验真通过数（含暂存，DESIGN §8-2）——「验真通过 N」
+            # 如实反映实测，「入库 M」如实反映落库，差额由门槛行解释。
+            passed += 1
+            held += 1
+        else:
+            failed += 1
+            if outcome.ok:
+                reason = (f"出口污染（{pollution_of(outcome.exit_profile)[1]}）")
+            else:
+                reason = outcome.reason or "验真失败"
+            report["dead_candidates"].append({
+                "url": item.extra.get("collected_from", ""),
+                "seed_id": item.extra.get("collect_seed_id", ""),
+                "stage": "verify",
+                "error": reason,
+            })
+    report["collect_held"] = held
+    report["candidates_dead"] = len(report["dead_candidates"])  # 账面保持一致
+    return passed, failed, entered
+
+
+def _print_collect_report(store: Store, report: dict, passed: int,
+                          failed: int, entered: int, gate: dict = None,
+                          gate_source: str = None) -> None:
+    """整轮报告逐行打印。输出红线（与 cmd_import_subscription 不回显订阅
+    地址同口径）：只报数字——节点地址、候选/种子地址原文、出口 IP、
+    dead_candidates 明细与 seeds[].error（异常文本可能含地址）一律不上屏。
+    task31 追加三行：门槛值（含「落盘设置 / 默认口径」来源注明与本轮
+    暂存数）/ 本轮截断数 / 开关状态——仍只报数字与固定词。"""
+    gate = gate or _collect_gate_values(None)
+    print(f"搜集轮 {report['round_id']}：种子 {report['seeds_total']}"
+          f"（成功 {report['seeds_ok']}、失败 {report['seeds_failed']}、"
+          f"停用跳过 {report['seeds_skipped']}）")
+    print(f"候选 {report['candidates_total']}"
+          f"（去重 {report['candidates_unique']}、"
+          f"死 {report['candidates_dead']}，其中验真未过 {failed}）")
+    print(f"候选池 {report['nodes_unique']}：验真通过 {passed}")
+    print(f"入库 {entered}（库内共 {store.count_nodes()} 个）")
+    held = report.get("collect_held", 0)
+    gate_line = (f"门槛：转登记须连续通过 {gate['promote_min']} 次 · "
+                 f"每轮验真上限 {gate['per_round']} 个 · "
+                 f"候选间隔 {gate['delay_ms']}ms"
+                 f"（{gate_source or '默认口径'}）")
+    if held:
+        gate_line += f" · 本轮暂存 {held} 个（验真通过、连续次数未达）"
+    print(gate_line)
+    truncated = report.get("collect_truncated", 0)
+    if truncated:
+        print(f"本轮截断 {truncated} 个"
+              "（超每轮上限，余下留待下轮验真，不记死账）")
+    else:
+        print("本轮截断 0 个")
+    if gate["enabled"]:
+        print(f"自动搜集开关：开（每 {gate['interval_min']} 分钟定时一轮；"
+              "只加库，不碰连接）")
+    else:
+        print("自动搜集开关：关（定时器不跑；手动 sources collect 不受影响）")
+    if report["zero_yield"]:
+        print("本轮产出 0：如实报告，无收获，不进正式库（零产出轮不假装有收获）。")
+
+
+def _sources_collect(store: Store, fetcher=None, engine_factory=None,
+                     settings_file=None) -> int:
+    """sources collect 本体：手动跑一轮自动搜集（CLI 触发形态只有手动
+    这一条命令，永远可用、不受 auto_collect_enabled 控制——开关只管
+    GUI 定时器是否到点自动跑同一个本函数）。
+
+    流程 = work9 DESIGN §7.2 步骤 3–4 的接线：读种子配置（collect_seeds.
+    json，seed_config_path 推导落点）→ 读健康账本（collect_ledger.json，
+    collect_ledger_path 推导落点）→ run_collection 一轮（fetch_fn 走
+    cmd_sources 既有 fetcher 注入点，默认复用 subscription.fetch_
+    subscription_text 的联网拉取口径，不另起第二套联网实现；parse_fn 见
+    _collect_parse）→ 账本落盘 → 候选池验真（门槛数字每轮现读统一设置，
+    task31）→ 过门槛入库 → 逐行打印数字报告。
+
+    门槛数字现读（task31，不持第二份可编辑副本）：settings_file（main/
+    cmd_sources 传来的 settings.json 落点，§4.1 同款口径）> 未给时与库
+    同目录推导（task17 _usage_provider 兜底先例）。文件在 → 落盘值；
+    文件不在 / 读取失败（损坏等）→ Settings() 默认值兜底（「默认口径」，
+    报告注明）——设置损坏的致命处置归 main 启动路径既有口径（退出码 2），
+    collect 运行中撞上只按默认口径跑完本轮并如实注明。读取只发生在种子
+    闸门通过之后，「未启用」早退路径零 IO。
+
+    未配置（not_configured）/ 空清单 / 全停用：打印「未启用」退出 0——
+    没配种子不是故障、不告警（work25 DONE 集成注意项）。配置或账本损坏
+    → ValueError 显式报错退出 2（seed_config / collector 既有口径，绝不
+    静默吞）。"""
+    try:
+        seeds, status = seed_src.load_seed_config(
+            seed_src.seed_config_path(store.path))
+    except ValueError as exc:
+        return _err(str(exc))
+    if status == seed_src.STATUS_NOT_CONFIGURED:
+        print("搜集未启用：还没有种子配置（collect_seeds.json）——按 schema "
+              "填一张种子表即接入；真实清单由主会话在集成时给定。")
+        return 0
+    if status == seed_src.STATUS_EMPTY:
+        print("搜集未启用：种子清单为空（collect_seeds.json 的 seeds 是空数组）。")
+        return 0
+    # 启用种子过滤：配置 enabled=false 的不进轮；账本停用的由 run_collection
+    # 自己跳过（缓刑复测口径不动）——双闸各管各的清单，既有行为零改动。
+    seeds = [s for s in seeds if s["enabled"]]
+    if not seeds:
+        print("搜集未启用：种子清单里没有启用的种子（enabled 全为 false）。")
+        return 0
+    # —— 门槛数字现读统一设置（task31）——
+    gate_settings, gate_source = None, "默认口径"
+    spath = (settings_file if settings_file is not None
+             else settings_store.settings_path(
+                 os.path.dirname(os.path.abspath(store.path or "client.db"))))
+    if os.path.isfile(os.fspath(spath)):
+        try:
+            gate_settings = settings_store.load_settings(spath)
+            gate_source = "落盘设置"
+        except (settings_store.SettingsStoreError, SettingsError):
+            gate_settings = None          # 损坏等：按默认口径跑完并注明
+    ledger_path = seed_src.collect_ledger_path(store.path)
+    try:
+        ledger = collector_src.load_ledger(ledger_path)
+    except ValueError as exc:
+        return _err(str(exc))
+    fetch_fn = fetcher if fetcher is not None \
+        else subscription_src.fetch_subscription_text
+    report = collector_src.run_collection(seeds, fetch_fn, _collect_parse,
+                                          ledger=ledger)
+    collector_src.save_ledger(ledger_path, ledger)
+    passed, failed, entered = _collect_enter_store(
+        store, report, engine_factory=engine_factory,
+        settings=gate_settings, ledger=ledger)
+    if report.get("pool"):
+        # task31：候选档案（连续通过计数 / 本轮未验）回写账本——第二轮
+        # 原子落盘（task27 的第一次落盘只含种子记账，位置与行为不动）。
+        collector_src.save_ledger(ledger_path, ledger)
+    _print_collect_report(store, report, passed, failed, entered,
+                          gate=_collect_gate_values(gate_settings),
+                          gate_source=gate_source)
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# 名单复查（task28 / work10 §6.3/§6.4）：机制本体在 core/list_recheck，
+# 这里只做两层粘合——verify_fn 按既有调用点对齐（不新造探测），cmd_lists
+# 负责计划/报告的打印（输出红线：只报 id/处置/原因与计数，不回显节点
+# 地址原文）。
+# ---------------------------------------------------------------------------
+def _recheck_verify_fn(store: Store, probe_factory, socks_port, http_port):
+    """lists recheck 的 verify_fn（合同见 core/list_recheck 模块头）。
+
+    sing-box 系节点：拉临时独立端口引擎测（与 GUI _test_node 同款口径；
+    探针必须经引擎代理出网——直连测到的是本机出口，假连当真连，P0）；
+    其余协议（隧道/未知）：走注入 probe_factory（与 cmd_verify 同款）。
+    verify_exit → 成功 apply_outcome + upsert + verify 样本 + 清容灾换下
+    标记（与 cmd_verify 同款）；失败只记样本、画像不动（既有口径）。
+    判定/写回全在既有管道里，这里不复刻。"""
+    def _fn(node):
+        stats = history.stats_for(store, node.id)
+        if node.protocol in SINGBOX_PROTOCOLS:
+            engine = SingBoxEngine(socks_port=socks_port, http_port=http_port)
+            try:
+                handle = engine.start(node)
+            except EngineError as exc:
+                history.record(store, node.id, "verify", False,
+                               detail=f"引擎启动失败: {exc}")
+                return VerifyOutcome(ok=False, reason=f"引擎启动失败: {exc}")
+            try:
+                outcome = verify_exit(
+                    node, make_real_probe(proxy=engine.http_proxy_url),
+                    stable=stats.stable)
+            finally:
+                engine.stop(handle)
+        else:
+            outcome = verify_exit(node, probe_factory(), stable=stats.stable)
+        if outcome.ok:
+            apply_outcome(node, outcome)
+            store.upsert_node(node)
+            history.record(store, node.id, "verify", True,
+                           latency_ms=outcome.latency_ms,
+                           exit_ip=node.exit_profile.ip, detail="验出口通过")
+            # U6 §5.4：验真成功清「容灾换下」标记（无标记 no-op；与 GUI 同口径）。
+            failover.clear_mark_on_link_success(store, node.id, True)
+        else:
+            history.record(store, node.id, "verify", False,
+                           detail=outcome.reason)
+        return outcome
+    return _fn
+
+
+def cmd_lists(store: Store, args, verify_fn, settings: Settings = None) -> int:
+    """lists recheck（task28）：白名单视图与隔离区节点到期复查。
+    --dry-run 只列计划不实测；真实跑逐节点处置并落 kind="recheck" 样本。
+    处置只提示不改人工标记：变脏移出视图不拉黑、黑名单可连只提示是否
+    放回（绝不自动放回）。"""
+    if args.lists_cmd != "recheck":
+        return _err(f"未知 lists 子命令: {args.lists_cmd}")
+    if settings is None:
+        settings = Settings()
+    try:
+        plan = list_recheck.plan_recheck(store, settings)
+    except ValueError as exc:    # list_recheck_days 非法/越界：显式报错不夹取
+        return _err(str(exc))
+    scope_txt = {"whitelist": "白名单", "quarantine": "隔离区"}
+    print(f"名单复查：周期每 {settings.list_recheck_days} 天"
+          f"（本轮计划 {len(plan)} 个）")
+    if not plan:
+        print("没有到期的复查对象（白名单视图与隔离区均无）")
+        return 0
+    for item in plan:
+        mark = " [跳过:OpenVPN]" if item["skip"] else ""
+        ban = " · 已拉黑" if item["banned"] else ""
+        last = ("未验真" if item["last_verified_at"] is None else
+                time.strftime("%Y-%m-%d %H:%M",
+                              time.localtime(item["last_verified_at"])))
+        print(f"  {item['node_id']}  [{scope_txt[item['scope']]}{ban}]{mark}"
+              f"  上次验真：{last}")
+    if args.dry_run:
+        print("（--dry-run：只列计划，未实测）")
+        return 0
+    report = list_recheck.run_recheck(store, settings, verify_fn)
+    disp_txt = {
+        "skip": "跳过", "missing": "不在库", "passed": "通过",
+        "dirty_out": "变脏移出", "view_lost": "移出视图",
+        "recheck_failed": "复查失败", "quarantine_cleared": "隔离摘牌",
+        "still_quarantined": "仍污染", "banned_recoverable": "可连待确认",
+    }
+    for item in report["items"]:
+        print(f"  [{disp_txt.get(item['disposition'], item['disposition'])}] "
+              f"{item['node_id']}：{item['reason']}")
+    c = report["counts"]
+    print(f"复查完成：计划 {report['planned']} · 实测 {report['verified']}"
+          f" · 跳过 {c['skip']} · 通过 {c['passed']}"
+          f" · 变脏移出 {c['dirty_out']} · 移出视图 {c['view_lost']}"
+          f" · 复查失败 {c['recheck_failed']}"
+          f" · 隔离摘牌 {c['quarantine_cleared']}"
+          f" · 仍污染 {c['still_quarantined']}"
+          f" · 黑名单可连待确认 {c['banned_recoverable']}")
+    if c["dirty_out"]:
+        print(f"⚠ {c['dirty_out']} 个白名单节点复查变脏"
+              "（已移出白名单视图；不自动拉黑，是否拉黑由人工决定）")
+    if c["banned_recoverable"]:
+        print("⚠ 有黑名单节点复查可连，是否放回请人工确认"
+              "（不会自动放回；人工解除可用 ban <node_id> --off）")
+    return 0
 
 
 def cmd_list(store: Store, args) -> int:
@@ -570,6 +1078,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_en.add_argument("entry_id")
     p_dis = sp.add_parser("disable", help="停用一条登记")
     p_dis.add_argument("entry_id")
+    sp.add_parser("collect",
+                  help="手动跑一轮自动搜集：读种子配置 → 拉源抽候选 → "
+                       "验真 → 入库（只报数字，不回显任何地址；未配置种子"
+                       "时提示未启用并退出 0）")
+
+    # 名单复查（task28 / work10 §6.3）：cmd_sources 旁的名单操作入口。
+    p = sub.add_parser("lists", help="名单复查：白名单视图/隔离区节点到期复查"
+                                     "（周期 list_recheck_days，默认 3 天）")
+    lsp = p.add_subparsers(dest="lists_cmd", required=True)
+    p_rc = lsp.add_parser("recheck",
+                          help="手动触发一轮名单复查（逐节点处置报告）")
+    p_rc.add_argument("--dry-run", action="store_true",
+                      help="只列本轮复查计划，不实测")
     return ap
 
 
@@ -625,7 +1146,15 @@ def main(argv=None, probe_factory=None, engine_factory=None, fetcher=None) -> in
         if args.cmd == "export-diag":
             return cmd_export_diag(store, args)
         if args.cmd == "sources":
-            return cmd_sources(store, args, fetcher=fetcher)
+            return cmd_sources(store, args, fetcher=fetcher,
+                               engine_factory=engine_factory,
+                               settings_file=sfile)
+        if args.cmd == "lists":
+            return cmd_lists(store, args,
+                             verify_fn=_recheck_verify_fn(
+                                 store, probe_factory,
+                                 RECHECK_SOCKS_PORT, RECHECK_HTTP_PORT),
+                             settings=settings)
         return _err(f"未知命令: {args.cmd}")
     finally:
         store.close()
