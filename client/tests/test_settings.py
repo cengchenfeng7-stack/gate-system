@@ -324,7 +324,9 @@ class TestParityWithUsageSettings(unittest.TestCase):
         self.assertEqual(set(Settings.__dataclass_fields__)
                          - set(USAGE_FIELDS),
                          {"socks_port", "http_port", "data_dir",
-                          "auto_probe_enabled", "auto_probe_interval_min"})
+                          "auto_probe_enabled", "auto_probe_interval_min",
+                          # U4/task19 W1 扩展位：测速载荷地址（§13-G 空槽）
+                          "speedtest_payload_url"})
 
     def test_shared_field_defaults_identical(self):
         mine, theirs = Settings(), _USAGE["UsageSettings"]()
