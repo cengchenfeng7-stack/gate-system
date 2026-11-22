@@ -30,8 +30,8 @@ from client.engines.singbox_engine import (
 )
 
 VLESS_UUID = "11111111-2222-3333-4444-555555555555"
-SOCKS_PORT = 18089          # 冷门端口，避免和真服务/真 sing-box 默认端口冲突
-HTTP_PORT = 18090
+SOCKS_PORT = 18093          # 冷门端口，避免和真服务/真 sing-box 默认端口冲突；
+HTTP_PORT = 18094           # 18089 已被本机 ZCode 中继占用，测试端口须避开它
 
 VMESS_FIELDS = {"v": "2", "ps": "vm-测试", "add": "vm.example.com", "port": "8443",
                 "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "aid": "0",
@@ -135,14 +135,15 @@ class TestBasics(unittest.TestCase):
     def test_module_constants_and_proxy_url(self):
         self.assertEqual(DEFAULT_SOCKS_PORT, 7898)
         self.assertEqual(DEFAULT_HTTP_PORT, 7897)
-        self.assertEqual(SINGBOX_PROTOCOLS, ("vless", "ss", "trojan", "vmess"))
+        self.assertEqual(SINGBOX_PROTOCOLS, ("vless", "ss", "trojan", "vmess",
+                                             "hysteria2", "tuic", "wireguard"))
         eng = SingBoxEngine()
         self.assertEqual(eng.name, "sing-box")
         self.assertEqual(eng.proxy_url, "socks5://127.0.0.1:7898")
         self.assertEqual(eng.http_proxy_url, "http://127.0.0.1:7897")
-        eng = SingBoxEngine(socks_port=18089, http_port=18090)
-        self.assertEqual(eng.proxy_url, "socks5://127.0.0.1:18089")
-        self.assertEqual(eng.http_proxy_url, "http://127.0.0.1:18090")
+        eng = SingBoxEngine(socks_port=SOCKS_PORT, http_port=HTTP_PORT)
+        self.assertEqual(eng.proxy_url, f"socks5://127.0.0.1:{SOCKS_PORT}")
+        self.assertEqual(eng.http_proxy_url, f"http://127.0.0.1:{HTTP_PORT}")
 
     def test_status_stop_of_none_handle(self):
         eng = SingBoxEngine()
@@ -201,6 +202,30 @@ class TestBuildConfig(unittest.TestCase):
         self.assertEqual(tls["reality"]["public_key"], "PUBKEY-xyz")
         self.assertEqual(tls["reality"]["short_id"], "ab12")
         self.assertEqual(tls["utls"]["enabled"], True)      # reality 必开 utls
+
+    def test_vless_flow_xray_variant_normalized(self):
+        # 真机排查实测（2026-11-21）：Xray 的 udp443 变体 sing-box 不认，
+        # 14 个节点因此启动失败——翻译成 sing-box 的标准名。
+        out = self.outbound(vless_node(
+            {"security": "tls", "flow": "xtls-rprx-vision-udp443"}))
+        self.assertEqual(out["flow"], "xtls-rprx-vision")
+
+    def test_vless_flow_unknown_passes_through(self):
+        out = self.outbound(vless_node(
+            {"security": "tls", "flow": "some-future-flow"}))
+        self.assertEqual(out["flow"], "some-future-flow")
+
+    def test_vless_fp_unsafe_omits_utls(self):
+        # mihomo 的 unsafe = 不伪造指纹 → 不写 utls 块（3 个节点卡在此）
+        out = self.outbound(vless_node({"security": "tls", "fp": "unsafe"}))
+        self.assertNotIn("utls", out["tls"])
+        self.assertEqual(out["tls"]["enabled"], True)
+
+    def test_vless_fp_unknown_omits_utls_and_default_is_chrome(self):
+        out = self.outbound(vless_node({"security": "tls", "fp": "netscape"}))
+        self.assertNotIn("utls", out["tls"])
+        out = self.outbound(vless_node({"security": "tls"}))
+        self.assertEqual(out["tls"]["utls"]["fingerprint"], "chrome")
 
     def test_vless_ws_transport(self):
         out = self.outbound(vless_node({
