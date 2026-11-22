@@ -12,6 +12,8 @@
   （养鱼池口径）。
 - 连接/断开/验出口全部经 Orchestrator——手动点选、连后强制验出口、
   掉线只告警停在原地，绝不自动切换（铁律在 orchestrator 里写死）。
+- 名单复查（task28 / work10 §6.3/§6.4）：白名单视图与隔离区节点按
+  list_recheck_days 到期复查（机制在 core/list_recheck；定时形态默认关）。
 - 会话在窗口进程内常驻：关窗最小化到托盘，托盘显示连接状态；
   巡检定时器调 orchestrator.poll()，掉线/假连 → 红色告警条 + 托盘提示。
 - 连接/验出口/导入订阅等慢操作放工作线程，事件经 Qt 信号回主线程，
@@ -31,9 +33,11 @@ import os
 import sys
 import time
 from collections import deque
+from types import SimpleNamespace
 
 from ..core import failover
 from ..core import history
+from ..core import list_recheck
 from ..core import ruleset_cache
 from ..core import settings_store as settings_store_io, site_blocklist
 from ..core.health import (HEALTH_DEAD, HEALTH_SUSPECT, check_ports_free,
@@ -386,6 +390,8 @@ if _QT_OK:
             self._health_samples = deque(maxlen=10)  # 健康探测样本（当前连接）
             self._health_active = False    # 健康探测一轮在跑（不占 _busy）
             self._sysproxy_active = False  # 系统代理复查一轮在跑（不占 _busy）
+            self._recheck_active = False   # 名单复查一轮在跑（不占 _busy，task28）
+            self._collect_active = False   # 自动搜集一轮在跑（不占 _busy，task31）
             self._health_tick = 0          # poll_once 滴答计数（3 tick≈15s 探测）
             self._sysproxy_alert = False   # 告警条当前是否在亮系统代理冲突
             self._tun_alert = False        # 告警条当前是否在亮 TUN 接管未生效
@@ -531,6 +537,21 @@ if _QT_OK:
             self.batch_all_btn = QPushButton("一键全测")
             self.batch_all_btn.clicked.connect(lambda: self.toggle_batch_test(all_nodes=True))
             actions.addWidget(self.batch_all_btn)
+            # 名单复查（task28 / work10 §6.3/§6.4）：白名单视图与隔离区节点
+            # 每 list_recheck_days 天复查一次（默认 3，2–7）。手动按钮即跑
+            # 一轮；定时形态走 auto_timer 子周期（_maybe_recheck），默认关
+            # ——自动复查的默认开关是未解决项（由主会话另定），此开关只对
+            # 本窗口会话生效、不持久化。
+            self.recheck_btn = QPushButton("复查名单")
+            self.recheck_btn.clicked.connect(self.recheck_now)
+            actions.addWidget(self.recheck_btn)
+            self.recheck_chk = QCheckBox("定时复查")
+            self.recheck_chk.setChecked(False)
+            self.recheck_chk.setToolTip(
+                "按设置 list_recheck_days（默认 3 天，可调 2–7）的周期，挂在"
+                "自动探测定时器子周期里检查到期对象并复查。默认关：自动复查"
+                "的默认开关待定，此开关只对本次窗口生效、不持久化。")
+            actions.addWidget(self.recheck_chk)
             refresh_btn = QPushButton("刷新")
             refresh_btn.clicked.connect(self.refresh_pages)
             actions.addWidget(refresh_btn)
@@ -550,7 +571,20 @@ if _QT_OK:
             self.poll_timer.start()
             self.auto_timer = QTimer(self)
             self.auto_timer.timeout.connect(self._maybe_auto_probe)
+            # task28：定时名单复查挂同一 auto_timer 子周期（_maybe_recheck
+            # 首行守卫默认关直返；不新增定时器）。
+            self.auto_timer.timeout.connect(self._maybe_recheck)
+            # task31：自动搜集第二只定时器——同一位置、同一 _apply_* 刷新
+            # 口径挂第二只 QTimer，不另起第二套调度实现（后台执行复用
+            # task28 泛化的 _launch_auto(tag=…) 通道）。刻意不骑 auto_timer：
+            # 它只在自动探测开关开时运行（_apply_auto_timer），骑上去会让
+            # 「搜集开、探测关」的组合静默失效；collect_timer 的启停唯一
+            # 归 auto_collect_enabled（默认关——铁律：不经主人点头，客户端
+            # 不许自己联网拉新节点）。
+            self.collect_timer = QTimer(self)
+            self.collect_timer.timeout.connect(self._maybe_auto_collect)
             self._load_auto_settings()  # 恢复上次的开关/间隔，顺带起定时器
+            self._apply_collect_timer()  # 自动搜集定时器按设置值起停（task31）
 
             self.refresh_pages()
             self._restore_last_node()
@@ -633,6 +667,50 @@ if _QT_OK:
             """开窗后先自动探一轮（由 main() 调用，测试不调它）。"""
             QTimer.singleShot(self._AUTO_STARTUP_DELAY_MS, self._maybe_auto_probe)
 
+        # ---------------- 自动搜集（task31：定时一轮，只加库不碰连接） ----------------
+        def _apply_collect_timer(self):
+            """开关/间隔 → collect_timer（不落盘；启动恢复与设置页保存同走
+            它，与 _apply_auto_timer 同款刷新口径）。开关关 = 不启动（铁律）。
+            刻意不骑 auto_timer（见 __init__ 注释）；间隔直接用
+            collect_interval_min（分钟级独立周期，与 auto_probe 的
+            interval → setInterval 同款映射，无需到点查到期）。"""
+            if not hasattr(self, "collect_timer"):
+                return
+            self.collect_timer.setInterval(
+                int(self.settings.collect_interval_min) * 60_000)
+            if self.settings.auto_collect_enabled:
+                self.collect_timer.start()
+            else:
+                self.collect_timer.stop()
+
+        def _maybe_auto_collect(self):
+            """定时器入口（自动搜集）：守卫全过才开一轮，与 _maybe_auto_probe
+            同款纪律（忙时不跑、连接中不跑）。自动搜集只往库里加候选：
+            不碰引擎连接、不切节点（铁律）；不与自动探测/名单复查互斥
+            ——三者的临时引擎端口两两错开（搜集 10838/10839、探测与复查
+            10828/10829）。搜集轮刻意不置 _busy（同自动探测：不挡用户
+            手动操作）。"""
+            if not self.settings.auto_collect_enabled:
+                return
+            if self._collect_active or self._busy or self._batch_active:
+                return
+            if self.orchestrator.state != Orchestrator.IDLE:
+                return  # 会话期间不跑，免得搜集验真流量干扰延迟测量
+            self._collect_active = True
+            self._launch_auto(self._run_auto_collect, tag="auto_collect")
+
+        def _run_auto_collect(self):
+            """定时一轮 = CLI 本体 _sources_collect 原样复用（不抄第二份
+            跑轮逻辑）：种子/账本/门槛数字全部由它现读落盘值；
+            settings_file 用本窗 settings_store 的落点（与设置页同一份
+            文件；离线测试替身形态无 settings_store → 库同目录推导兜底）。
+            返回退出码（0 = 一轮跑完，含零产出轮与未启用）。"""
+            from . import cli as cli_src
+            settings_file = (self.settings_store.path
+                             if self.settings_store is not None else None)
+            return cli_src._sources_collect(self.store,
+                                            settings_file=settings_file)
+
         # ---------------- 设置页（task24 §5/§6 落页） ----------------
         def open_settings(self):
             """打开设置页（模态）。保存成功后的落地见 _apply_saved_settings
@@ -649,6 +727,9 @@ if _QT_OK:
         def _apply_saved_settings(self, s: Settings):
             """设置页保存后的窗侧落地（§5.3 逐项口径，不许含糊）：
             - 自动探测：**立即生效**——控件同步 → _apply_auto_timer；
+            - 自动搜集（task31）：开关/间隔**立即生效**——
+              _apply_collect_timer 按新值重建定时器（门槛数字不在窗侧
+              持副本，定时跑轮每轮经 CLI 本体现读落盘值）；
             - 端口 / 规则五项：**下次连接生效**——空闲时即在保存点对齐
               引擎端口（_sync_engine_ports_with_settings；连接中不进来，
               断开后下次 connect 起新端口；连接构造点另有安全网）；规则
@@ -666,10 +747,12 @@ if _QT_OK:
             finally:
                 self._applying_settings = False
             self._apply_auto_timer()
+            self._apply_collect_timer()
             self._sync_engine_ports_with_settings()
             self._show_info(
-                "设置已保存：自动探测立即生效；端口 / 规则与网络下次连接"
-                "生效；数据目录下次启动生效（不会搬移旧数据）。")
+                "设置已保存：自动探测立即生效；自动搜集开关与间隔立即生效"
+                "（门槛数字每轮现读）；端口 / 规则与网络下次连接生效；"
+                "数据目录下次启动生效（不会搬移旧数据）。")
 
         def _sync_engine_ports_with_settings(self):
             """连接构造点对齐（§5.3「下次连接生效 = 重启引擎」/ §8-1）：空闲时
@@ -952,6 +1035,8 @@ if _QT_OK:
                 return
             if self._auto_active or self._busy or self._batch_active:
                 return
+            if self._recheck_active:
+                return  # 定时名单复查正占 10828/10829 端口对，两者互斥（task28）
             if self.orchestrator.state != Orchestrator.IDLE:
                 return  # 连接期间不跑，免得探测流量干扰会话延迟测量
             ids = self._auto_probe_ids()
@@ -960,9 +1045,11 @@ if _QT_OK:
             self._auto_active = True
             self._launch_auto(lambda: self._run_auto_probe(ids))
 
-        def _launch_auto(self, fn):
-            """开一轮自动探测的后台线程（测试里可换成同步替身）。"""
-            worker = _Worker(self.bridge, "auto_probe", fn)
+        def _launch_auto(self, fn, tag="auto_probe"):
+            """开一轮自动探测的后台线程（测试里可换成同步替身）。
+            task28：定时名单复查复用本通道（tag="auto_recheck"），旗标
+            各管各的（_auto_active / _recheck_active），互不误清。"""
+            worker = _Worker(self.bridge, tag, fn)
             self._workers.append(worker)
             worker.finished.connect(lambda: self._workers.remove(worker))
             worker.start()
@@ -1004,6 +1091,86 @@ if _QT_OK:
                 self.bridge.progress.emit(
                     f"自动探测 {done}/{total}：可连 {ok_n} · 不通 {fail_n}")
             return ("auto_done", ok_n, fail_n, done, total)
+
+        # ---------------- 名单复查（task28 / work10 §6.3/§6.4） ----------------
+        # 口径（本窗只接线，机制在 core/list_recheck）：白名单 = 派生视图
+        # （is_clean is True 且未被隔离）+ 隔离区，按 list_recheck_days
+        # （默认 3 天，可调 2–7）到期复查；复查走 _test_node 既有管道，
+        # 不新造探测。处置只提示不改人工标记：变脏移出视图不拉黑、链路死
+        # 画像不动、黑名单恢复可连只提示（人工确认才解除）、隔离恢复自动
+        # 摘牌（既有 _apply_quarantine 口径）。绝不自动拉黑、绝不自动放回。
+        def _recheck_verify_outcome(self, node, make_engine=None):
+            """run_recheck 注入的 verify_fn（合同见 list_recheck 模块头）：
+            复用 _test_node 全套既有管道（临时独立端口引擎 + verify_exit +
+            apply_outcome + verify 样本），把 (kind, text) 转译成 outcome
+            形态（.ok/.reason）。判定/写回全在既有管道里，这里不复刻。"""
+            kind, text = self._test_node(
+                node.id, make_engine=make_engine or self._make_temp_engine)
+            return SimpleNamespace(ok=(kind == "verify_ok"), reason=text)
+
+        def _run_recheck_once(self, make_engine=None):
+            """跑一轮名单复查（工作线程内调用）：计划/处置/样本全在
+            core/list_recheck.run_recheck，本窗只供 store/settings/verify_fn。"""
+            return list_recheck.run_recheck(
+                self.store, self.settings,
+                lambda node: self._recheck_verify_outcome(node, make_engine))
+
+        def recheck_now(self):
+            """手动「复查名单」：走 _run_task 工作线程（验真是磁盘/网络 IO，
+            不进主线程）；忙时直接忽略（与连接/测速同款守卫）。"""
+            if self._busy or self._batch_active or self._recheck_active:
+                return
+            self._run_task("recheck", self._run_recheck_once)
+
+        def _maybe_recheck(self):
+            """定时复查入口（auto_timer 子周期，与自动探测同款守卫：忙时
+            不跑）。默认关（自动复查默认开关是未解决项；此开关不持久化，
+            只对当前窗口会话生效）。守卫全过且确有到期对象才开一轮；与
+            自动探测共用 10828/10829 端口对，双方互斥（_maybe_auto_probe
+            亦查 _recheck_active）。"""
+            if not self.recheck_chk.isChecked():
+                return
+            if (self._recheck_active or self._busy or self._batch_active
+                    or self._auto_active):
+                return
+            if self.orchestrator.state != Orchestrator.IDLE:
+                return  # 连接期间不跑（同自动探测口径）
+            try:
+                due = list_recheck.plan_recheck(self.store, self.settings)
+            except ValueError as exc:   # list_recheck_days 非法/越界：如实报
+                self._show_alert(f"名单复查设置非法，本轮不跑：{exc}")
+                return
+            if not due:
+                return
+            self._recheck_active = True
+            self._launch_auto(lambda: self._run_recheck_once(
+                make_engine=self._make_auto_engine), tag="auto_recheck")
+
+        def _finish_recheck(self, report):
+            """复查结果落地（主线程）：状态行只报计数与处置（不回显节点
+            地址原文）。名单是派生视图，画像刷新后 refresh_pages 自然更新；
+            变脏只提示不拉黑，黑名单可连只提示待人工确认（绝不自动放回）。"""
+            c = report["counts"]
+            parts = [f"名单复查完成：实测 {report['verified']}/{report['planned']}"
+                     f" · 跳过 {c['skip']}"]
+            if c["passed"]:
+                parts.append(f"通过 {c['passed']}")
+            if c["recheck_failed"]:
+                parts.append(f"复查失败 {c['recheck_failed']}（画像未动）")
+            if c["quarantine_cleared"]:
+                parts.append(f"隔离摘牌 {c['quarantine_cleared']}")
+            if c["still_quarantined"]:
+                parts.append(f"仍污染 {c['still_quarantined']}")
+            if c["view_lost"]:
+                parts.append(f"干净度未知移出视图 {c['view_lost']}")
+            text = " · ".join(parts)
+            if c["dirty_out"]:
+                text += (f"｜⚠ {c['dirty_out']} 个白名单节点复查变脏"
+                         "（已移出白名单视图，不自动拉黑）")
+            if c["banned_recoverable"]:
+                text += (f"｜⚠ {c['banned_recoverable']} 个黑名单节点复查可连，"
+                         "是否放回请人工确认（不会自动放回）")
+            self._show_info(text)
 
         def toggle_pin(self):
             node = self.selected_node()
@@ -1386,6 +1553,12 @@ if _QT_OK:
                 self._health_active = False
             elif tag == "sysproxy_check":
                 self._sysproxy_active = False
+            elif tag == "auto_recheck":
+                # 定时名单复查同样不占 _busy：只复位自己的旗标（task28）
+                self._recheck_active = False
+            elif tag == "auto_collect":
+                # 定时搜集轮同样不占 _busy：只复位自己的旗标（task31）
+                self._collect_active = False
             else:
                 self._busy = False
             if tag == "batch":
@@ -1395,6 +1568,14 @@ if _QT_OK:
                 self._finish_health_probe(ok, payload)
             elif tag == "sysproxy_check":
                 self._finish_sysproxy_check(ok, payload)
+            elif tag == "auto_collect":
+                # 定时搜集轮收尾（task31 红线）：失败只记 stderr 日志——
+                # 不弹红条、不碰连接状态（status_label 不写）；成功也不抢
+                # 状态栏（新节点经收尾统一的 refresh_pages 直接出现在库页；
+                # 数字详情由 _sources_collect 打到 stdout，不入界面）。
+                if not ok:
+                    print(f"[自动搜集] 定时跑轮失败：{payload}",
+                          file=sys.stderr)
             elif not ok:
                 if isinstance(payload, OrchestratorError):
                     self._show_alert(str(payload))
@@ -1426,6 +1607,10 @@ if _QT_OK:
                     msg += (f"；本轮废节点 {len(waste)} 个，"
                             "点「一键删废节点」可删掉")
                 self._show_info(msg)
+            elif tag in ("recheck", "auto_recheck") and ok \
+                    and isinstance(payload, dict):
+                # 名单复查（task28）：手动/定时同口径落地，状态行报计数
+                self._finish_recheck(payload)
             elif tag == "import_url" and ok:
                 self._intake_done(
                     payload.nodes,
@@ -1461,6 +1646,7 @@ if _QT_OK:
                 "真机实现，当前版本选 TUN 点连接会显式报错。")
             self.disconnect_btn.setEnabled(connected and not self._busy)
             self.verify_btn.setEnabled(has_sel and not self._busy)
+            self.recheck_btn.setEnabled(not self._busy)   # task28：复查名单
             self.pin_btn.setEnabled(has_sel)
             self.ban_btn.setEnabled(has_sel)
             if self._batch_active:

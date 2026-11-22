@@ -326,7 +326,16 @@ class TestParityWithUsageSettings(unittest.TestCase):
                          {"socks_port", "http_port", "data_dir",
                           "auto_probe_enabled", "auto_probe_interval_min",
                           # U4/task19 W1 扩展位：测速载荷地址（§13-G 空槽）
-                          "speedtest_payload_url"})
+                          "speedtest_payload_url",
+                          # task28 扩展位：名单复查周期（work10 §6.3，
+                          # 默认 3 天可调 2–7；随 Settings 字段增加机械平移）
+                          "list_recheck_days",
+                          # task31 扩展位：自动搜集门槛与开关五项（work31
+                          # DESIGN §2/§5；随 Settings 字段增加机械平移）
+                          "auto_collect_enabled", "collect_interval_min",
+                          "collect_verify_per_round",
+                          "collect_verify_delay_ms",
+                          "collect_promote_min_ok"})
 
     def test_shared_field_defaults_identical(self):
         mine, theirs = Settings(), _USAGE["UsageSettings"]()
